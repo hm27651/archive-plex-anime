@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.archive-state.json
+.archive-temp/
+.archive-logs/
+execution-cache.json
+.DS_Store
+Thumbs.db

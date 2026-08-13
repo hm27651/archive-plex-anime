@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "paths": {
+    "workRoot": "",
+    "movieWorkRoot": "",
+    "primaryFonts": "",
+    "fallbackFonts": "",
+    "fallbackFontDatabase": "",
+    "assfontsDatabase": "",
+    "subtitleArchiveRoot": "",
+    "movieSubtitleArchiveRoot": ""
+  },
+  "storageTargets": {},
+  "plexLibraries": {},
+  "tools": {
+    "python": "",
+    "mediainfo": "",
+    "mkvmerge": "",
+    "mkvinfo": "",
+    "assfonts": "",
+    "otf2ttf": "",
+    "ffmpeg": "",
+    "ffprobe": "",
+    "kdocs-cli": ""
+  },
+  "metadata": {
+    "enabled": true,
+    "mode": "auto",
+    "primary": "tmdb",
+    "secondary": "tvdb",
+    "episodeOrder": "tmdb",
+    "language": "zh-CN",
+    "proxy": "",
+    "timeoutSeconds": 10
+  },
+  "tracker": {
+    "enabled": false,
+    "type": "kdocs",
+    "name": "",
+    "worksheet": ""
+  },
+  "defaults": {
+    "library": "Anime3",
+    "movieLibrary": "Movie3"
+  }
+}

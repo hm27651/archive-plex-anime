@@ -1,0 +1,4 @@
+interface:
+  display_name: "动画媒体库归档"
+  short_description: "面向 Plex、Emby、Jellyfin 的动画媒体检查、字幕、封装、洗版与归档"
+  default_prompt: "使用 $archive-plex-anime 检查并执行本次动画 TV 或 Movie 媒体归档任务。"

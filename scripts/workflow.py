@@ -16,12 +16,20 @@ from archive_rules import (
     resolve_path,
     state_path,
 )
+from capabilities import (
+    PRESET_VERSION,
+    PRESETS,
+    capabilities_to_legacy_steps,
+    capability_catalog,
+    legacy_steps_to_capabilities,
+    resolve_capabilities,
+)
 from common import WorkflowIssue, backend_cache_path, backend_command, configure_utf8_stdio, load_config, load_state, read_text, save_state
 from media_plan import build_plan, local_only_request_issues
 from plan_common import update_release_history
 
 
-TASKS = {"complete-archive", "replacement", "archive-only", "local-only"}
+TASKS = set(PRESETS)
 METADATA_DECISION_KEYS = {
     "enabled", "mode", "query", "tmdb_id", "tmdb_type", "tvdb_id", "language",
     "episode_order", "year", "season_bindings",
@@ -90,19 +98,60 @@ def init_state(args: argparse.Namespace) -> dict:
         raise WorkflowIssue("FAILED", f"configured work root is not a task directory: {work}")
     task = args.task
     decisions = load_decisions(args)
-    requested = [item.strip() for item in args.steps.split(",") if item.strip()] if args.steps else None
-    if task == "local-only":
+    raw_steps = getattr(args, "steps", None)
+    raw_capabilities = getattr(args, "capabilities", None)
+    if raw_steps and raw_capabilities:
+        raise WorkflowIssue("NEEDS_USER", "--steps and --capabilities cannot be used together")
+    requested = [item.strip() for item in raw_steps.split(",") if item.strip()] if raw_steps else None
+    requested_capabilities = (
+        [item.strip() for item in raw_capabilities.split(",") if item.strip()]
+        if raw_capabilities
+        else legacy_steps_to_capabilities(requested)
+    )
+    selection_mode = "custom" if raw_capabilities else "preset"
+    entrypoint = str(getattr(args, "entrypoint", None) or "cli")
+    if task == "local-only" and requested:
         request_issues = local_only_request_issues(requested)
         if request_issues:
             raise WorkflowIssue("NEEDS_USER", json.dumps({"issues": request_issues}, ensure_ascii=False))
+    selection = resolve_capabilities(
+        selection_mode=selection_mode,
+        preset=task,
+        requested=requested_capabilities,
+        entrypoint=entrypoint,
+        branch=args.branch,
+    )
+    if selection_mode == "custom" and not selection["final_sinks"] and task in {"complete-archive", "replacement"}:
+        task = "local-only"
+        selection = resolve_capabilities(
+            selection_mode=selection_mode,
+            preset=task,
+            requested=requested_capabilities,
+            entrypoint=entrypoint,
+            branch=args.branch,
+        )
+    if selection["issues"]:
+        raise WorkflowIssue("NEEDS_USER", json.dumps({"issues": selection["issues"]}, ensure_ascii=False))
+    if selection_mode == "custom" and task == "local-only":
+        requested = capabilities_to_legacy_steps(requested_capabilities)
     state = {
         "schema": STATE_SCHEMA,
         "rules_version": RULES_VERSION,
         "work_dir": str(work),
         "branch": args.branch,
         "task": task,
+        "selection_mode": selection_mode,
+        "preset": task if selection_mode == "preset" else None,
+        "preset_version": PRESET_VERSION,
+        "entrypoint": entrypoint,
         "requested_steps": requested,
+        "requested_capabilities": selection["requested_capabilities"],
+        "resolved_capabilities": selection["resolved_capabilities"],
+        "auto_added_capabilities": selection["auto_added_capabilities"],
+        "unavailable_capabilities": [],
         "selected_steps": ["inspect"],
+        "requested_final_sinks": selection["final_sinks"],
+        "final_sinks": [],
         "completed_steps": [],
         "approvals": {"preflight": False, "final": False},
         "decisions": decisions,
@@ -213,7 +262,9 @@ def internal_plan_ready(work: Path, selected_steps: list[str]) -> bool:
     except (OSError, json.JSONDecodeError):
         return False
     plan = manifest.get("plan", {})
-    if not plan or ("review" in selected_steps and not plan.get("final", {}).get("video")):
+    final = plan.get("final", {})
+    has_final_action = bool(final.get("video") or final.get("zip") or final.get("tracker") is True)
+    if not plan or ("review" in selected_steps and not has_final_action):
         return False
     has_subtitles = bool(manifest.get("discovery", {}).get("subtitles"))
     if "subtitle" in selected_steps and has_subtitles and not plan.get("renameJobs"):
@@ -238,6 +289,12 @@ def inspect_backend(work: Path, state: dict, *, rerun: bool = False) -> dict:
         extra.append("--retain-embedded-subtitles")
     for requested in state.get("requested_steps") or []:
         extra.extend(["--requested-step", str(requested)])
+    for capability in state.get("resolved_capabilities") or []:
+        extra.extend(["--selected-capability", str(capability)])
+    for sink in state.get("requested_final_sinks") or state.get("final_sinks") or []:
+        extra.extend(["--selected-final-sink", str(sink)])
+    if "kdocs-tracker" in state.get("resolved_capabilities", []) and state.get("entrypoint") != "hub":
+        extra.append("--kdocs-tracker")
     movie_audio_pairs = decisions.get("movie_audio_pairs")
     disc_source = decisions.get("disc_source") or decisions.get("m2ts")
     if state.get("branch") == "movie" and (movie_audio_pairs or disc_source or decisions.get("movie_audio_replacement")):
@@ -266,6 +323,15 @@ def configure_backend(work: Path, state: dict) -> dict:
     elif generated.get("resolved_release_group"):
         state.setdefault("decisions", {})["release_group"] = generated["resolved_release_group"]
     state["selected_steps"] = generated["selected_steps"]
+    for key in (
+        "requested_capabilities",
+        "resolved_capabilities",
+        "auto_added_capabilities",
+        "unavailable_capabilities",
+        "final_sinks",
+    ):
+        if key in generated:
+            state[key] = generated[key]
     output = backend_command(
         work,
         "configure",
@@ -396,10 +462,20 @@ def approve(args: argparse.Namespace) -> dict:
                 if target.get(key) and str(target[key]) != str(value):
                     raise WorkflowIssue("NEEDS_USER", f"final target changed for {key}: {target[key]!r} -> {value!r}")
                 target[key] = value
-        required = {"library", "video_root", "operation", "batch_id", "batch_digest"}
-        if target.get("zip"):
+        if "final_sinks" in state:
+            sinks = set(state.get("final_sinks", []))
+        else:
+            sinks = {"video"}
+            if target.get("zip"):
+                sinks.add("subtitle_zip")
+            if state.get("task") != "local-only":
+                sinks.add("tracker")
+        required = {"library", "operation", "batch_id", "batch_digest"}
+        if "video" in sinks:
+            required.add("video_root")
+        if "subtitle_zip" in sinks:
             required.add("zip")
-        if state.get("task") != "local-only":
+        if "tracker" in sinks:
             required.add("tracker_column")
         missing = sorted(key for key in required if not target.get(key))
         if missing:
@@ -420,7 +496,12 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--branch", choices=["tv", "movie"], required=True)
     init.add_argument("--task", choices=sorted(TASKS), default="complete-archive")
     init.add_argument("--steps")
+    init.add_argument("--capabilities", help="comma-separated public capabilities; enables custom selection mode")
+    init.add_argument("--entrypoint", choices=["cli", "skill", "hub"], default="cli")
     init.add_argument("--decisions-stdin", action="store_true", help="read UTF-8 decisions JSON from stdin")
+    catalog = sub.add_parser("capabilities")
+    catalog.add_argument("--entrypoint", choices=["cli", "skill", "hub"], default="cli")
+    catalog.add_argument("--branch", choices=["tv", "movie"])
     status = sub.add_parser("status")
     status.add_argument("--work-dir")
     approval = sub.add_parser("approve-preflight")
@@ -443,6 +524,8 @@ def main(argv: list[str] | None = None) -> int:
         args = build_parser().parse_args(argv)
         if args.command == "init":
             output = init_state(args)
+        elif args.command == "capabilities":
+            output = {"status": "OK", **capability_catalog(args.entrypoint, args.branch)}
         elif args.command == "status":
             output = {"status": "OK", "state": load_task_state(work_dir(args))}
         elif args.command == "approve-preflight":

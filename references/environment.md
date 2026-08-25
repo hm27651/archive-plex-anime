@@ -41,7 +41,14 @@ Movie 字幕归档：  paths.movieSubtitleArchiveRoot
 以下示例中的 `$python` 取配置 `tools.python`，`$workflow` 指向 `scripts\workflow.py`：
 
 ```powershell
+# 查看某入口和分支可选择的能力/预置
+& $python $workflow capabilities --entrypoint cli --branch tv
+
+# 使用预置工作流
 & $python $workflow init --work-dir $workDir --branch tv --task complete-archive --decisions-stdin
+
+# 或使用自定义能力（与预置选择互斥）
+& $python $workflow init --work-dir $workDir --branch tv --task complete-archive --capabilities remux,subtitle-package --decisions-stdin
 & $python $workflow inspect --work-dir $workDir
 
 # 用户前置确认后
@@ -58,7 +65,7 @@ Movie 字幕归档：  paths.movieSubtitleArchiveRoot
 & $python $workflow cleanup --work-dir $workDir
 ```
 
-实际分支使用 `--branch tv` 或 `--branch movie`；模式使用 `complete-archive`、`replacement`、`archive-only`、`local-only`。只执行状态中的 `selected_steps`，不手工补步骤。local-only 的 `--steps` 只接受 `movie-audio`、`subtitle`、`remux`、`package`（`inspect` 自动执行）；不得请求 `review`，因为各本地步骤已经当场执行相同验收。
+实际分支使用 `--branch tv` 或 `--branch movie`；模式使用 `complete-archive`、`replacement`、`archive-only`、`local-only`。只执行状态中的 `selected_steps`，不手工补步骤。新调用优先使用公开 `--capabilities`；不含最终输出的自定义选择自动按 local-only 规划。local-only 的兼容 `--steps` 只接受 `movie-audio`、`subtitle`、`remux`、`package`（`inspect` 自动执行）。Hub 调用必须增加 `--entrypoint hub`，其能力目录和任务状态不会包含 KDocs。
 
 用户决定仅支持 `--decisions-stdin`，不支持命令行 JSON 参数或人工计划文件。
 

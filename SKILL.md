@@ -23,6 +23,10 @@ description: Use when inspecting, organizing, subtitling, remuxing, packaging, a
 
 `local-only` 不选择 `review`：各本地步骤当场执行与 review 相同的产物验收，显式请求 `review` 返回 `LOCAL_STEP_UNSUPPORTED`。`review` 只用于需要准备最终 NAS、字幕归档和维护表动作的任务。
 
+四个模式也是版本化预置工作流。用户要求按需执行时，改用自定义能力选择：`inspect`、`metadata`、`movie-audio`、`subtitle`、`remux`、`subtitle-package`、`video-delivery`、`subtitle-delivery`、`kdocs-tracker`、`cleanup`。只选择公开能力，不直接选择 `prepare-fonts`、`subset`、`rename`、`review` 或 `finalize`；统一解析器负责依赖、冲突、实际可用性、内部步骤和最终输出。预置与自定义选择不混用；自定义选择不含最终输出能力时自动按 `local-only` 规划。
+
+CLI 与本独立 Skill 保留 KDocs。作为 Hub 入口运行时必须使用 `--entrypoint hub`，能力目录、前检、配置和执行均不得出现 `kdocs-tracker`；不得由 Hub 自行补回维护表动作。
+
 ## 执行工作流
 
 先读取 [references/workflow.md](references/workflow.md)，再按分支读取：
@@ -43,6 +47,8 @@ init → inspect → 前置确认
 ```
 
 方括号步骤由统一计划器按任务与媒体实际情况选择。正常完整任务只暂停两次：前置确认，以及本地产物验收后的最终确认。确认后发现输入、环境或目标变化时返回 `FAILED`，不临时增加第三次确认。
+
+查看能力目录：`python scripts/workflow.py capabilities --entrypoint cli|skill|hub --branch tv|movie`。自定义初始化使用 `init ... --capabilities remux,subtitle-package`；解析结果写入状态中的请求能力、自动补齐能力、内部步骤和实际最终输出。重新初始化不同选择会清空旧完成步骤和确认。
 
 ## 强制规则
 
@@ -76,7 +82,7 @@ init → inspect → 前置确认
 
 ## 计划、状态与后端
 
-计划只列本次选中的工作流步骤，不向用户展开逐文件命令或产物对象。保留最小 `.archive-state.json`；详细计划、实际编号路径和执行结果只写 `.archive-temp/execution-cache.json`。属于当前目录且 schema、工作流版本与 inspect 状态有效的前检缓存，即使包含 `NEEDS_USER` 也保存 inspect 检查点；工具、媒体或缓存硬失败不保存。
+计划只列本次选中的工作流步骤，不向用户展开逐文件命令或产物对象。保留最小 `.archive-state.json`，并记录 `selection_mode`、`preset`/`preset_version`、`entrypoint`、请求/解析/自动补齐/不可用能力、`selected_steps` 和实际 `final_sinks`；详细计划、实际编号路径和执行结果只写 `.archive-temp/execution-cache.json`。属于当前目录且 schema、工作流版本与 inspect 状态有效的前检缓存，即使包含 `NEEDS_USER` 也保存 inspect 检查点；工具、媒体或缓存硬失败不保存。
 
 首次 `inspect` 执行完整前检；`inspect --rerun` 只用路径、大小和修改时间比较视频、字幕、工作目录字体、字体索引、库位输入及 Movie 原盘音轨源，复用未变化的有效结果，只重跑受影响组件。Movie 堆叠片按 `cdN` 独立复用已成功的 PCM 结果；计划摘要始终重新生成。缓存缺失、损坏或版本不兼容时自动回退完整前检，不增加状态文件、公开步骤或确认关卡。
 

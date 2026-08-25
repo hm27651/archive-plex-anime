@@ -51,6 +51,12 @@ def run(context):
         extra.append("--retain-embedded-subtitles")
     for requested in state.get("requested_steps") or []:
         extra.extend(["--requested-step", str(requested)])
+    for capability in state.get("resolved_capabilities") or []:
+        extra.extend(["--selected-capability", str(capability)])
+    for sink in state.get("requested_final_sinks") or state.get("final_sinks") or []:
+        extra.extend(["--selected-final-sink", str(sink)])
+    if "kdocs-tracker" in state.get("resolved_capabilities", []) and state.get("entrypoint") != "hub":
+        extra.append("--kdocs-tracker")
     movie_audio_pairs = decisions.get("movie_audio_pairs")
     disc_source = decisions.get("disc_source") or decisions.get("m2ts")
     if state.get("branch") == "movie" and (movie_audio_pairs or disc_source or decisions.get("movie_audio_replacement")):
@@ -68,9 +74,20 @@ def run(context):
         manifest = json.loads(read_text(backend_cache_path(work)))
         generated = build_plan(work, manifest, state)
         state["selected_steps"] = generated["selected_steps"]
+        for key in (
+            "requested_capabilities",
+            "resolved_capabilities",
+            "auto_added_capabilities",
+            "unavailable_capabilities",
+            "final_sinks",
+        ):
+            state[key] = generated[key]
         save_state(work, state)
         preflight = {
             "issues": generated["issues"], "summary": generated["summary"], "steps": generated["selected_steps"],
+            "capabilities": generated["resolved_capabilities"],
+            "auto_added_capabilities": generated["auto_added_capabilities"],
+            "final_sinks": generated["final_sinks"],
             "metadata": public_metadata_summary(generated.get("metadata")),
         }
     pending = bool(preflight and preflight["issues"])

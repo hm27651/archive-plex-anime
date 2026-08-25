@@ -10,12 +10,14 @@ init → inspect → approve-preflight
 → review → approve-final → finalize → cleanup
 ```
 
-`media_plan.py` 根据任务模式调度平级的 `tv_plan.py` / `movie_plan.py`。`workflow.py` 只管理步骤、两次确认和恢复，不解析字幕、轨道或库位。
+`capabilities.py` 统一维护公开能力、四个预置、入口可见范围、依赖和最终输出映射；`media_plan.py` 根据解析结果调度平级的 `tv_plan.py` / `movie_plan.py`。`workflow.py` 只管理步骤、两次确认和恢复，不解析字幕、轨道或库位。
 
 - `complete-archive`：选择所有适用本地步骤及 review/finalize/cleanup；
 - `replacement`：由分支计划器选择普通洗版或 Movie 原盘音轨步骤；
 - `archive-only`：由 TV/Movie 各自生成直接入库计划，不选择 remux；
 - `local-only`：只选择用户要求的 `movie-audio`、`subtitle`、`remux`、`package` 及必要依赖，`inspect` 自动执行；不写 NAS、维护表或删除目录。`review` 会同时准备最终目标，因此不属于 local-only；显式请求时返回 `LOCAL_STEP_UNSUPPORTED`。
+
+预置之外可以选择 `inspect`、`metadata`、`movie-audio`、`subtitle`、`remux`、`subtitle-package`、`video-delivery`、`subtitle-delivery`、`kdocs-tracker`、`cleanup`。用户不直接选择内部步骤；解析器自动补依赖并按实际媒体计划删除不可用的预置能力。自定义请求的能力不可用时明确返回问题，不静默改成其他工作流。CLI/Skill 可见 KDocs，Hub 不展示、不检查、不配置、不执行 KDocs。
 
 完整任务必须有可执行计划；空计划不得进入 review。
 
@@ -114,10 +116,10 @@ ZIP 使用存储模式并将最终中文条目统一写为 UTF-8；读取未设�
 - 将规范化最终动作、各本地产物的路径/大小/修改时间轻量签名及维护表计划计算为完整 SHA-256；短 `batchId` 仅为其前 24 位；
 - 返回简洁产物计数、warning 和最终写入摘要。
 
-用户确认本地产物与最终动作后，`finalize` 并行执行：
+用户确认本地产物与最终动作后，`finalize` 对实际选中的输出并行执行：
 
 ```text
-NAS 视频写入 | 可选字幕 ZIP 写入 | Plex 维护表更新
+可选 NAS 视频写入 | 可选字幕 ZIP 写入 | 可选 Plex 维护表更新
 ```
 
 `approve-final` 将完整批次摘要写入最小状态；`finalize` 根据当前最终动作重新计算摘要，同时核对已批准摘要和短 `batchId`，任一变化都在写入前 `FAILED`。
@@ -142,11 +144,11 @@ NAS 视频写入 | 可选字幕 ZIP 写入 | Plex 维护表更新
 - 维护表按 KDocs 上限分块；开始或重试时将实时目标列与“已完成块为本批次预期、未完成块为前检快照”的各合法前缀匹配，每块成功立即保存进度并从首个未完成块续传；无法匹配任何合法前缀才以 `TRACKER_CONCURRENT_CHANGE` 停止继续写入并失败；
 - 最终视频、ZIP 和维护表仍并行执行，上述检查不增加确认关卡。
 
-全部选中写入成功后，`cleanup` 再次确认所有必要目标位于任务目录外、存在且源/目标/检查点大小一致，才可删除整个任务目录。
+全部选中写入成功后，`cleanup` 只检查实际 `final_sinks` 对应的目标和检查点；它们必须位于任务目录外、存在且源/目标/检查点大小一致，才可删除整个任务目录。
 
 ## 6. 状态、恢复与错误
 
-`.archive-state.json` 只保存 schema/rules_version、任务、分支、选中/完成步骤、用户决定、两次确认、已批准完整批次摘要、简洁最终目标、直接覆盖尝试和最终写入/维护表分块检查点。当前契约为 `STATE_SCHEMA=6`、`RULES_VERSION=17`；执行缓存为 `BACKEND_CACHE_SCHEMA=17`、工作流修订 `2026-08-13-metadata-title-extraction`，旧状态不迁移。
+`.archive-state.json` 只保存 schema/rules_version、任务、分支、能力选择与最终输出、选中/完成步骤、用户决定、两次确认、已批准完整批次摘要、简洁最终目标、直接覆盖尝试和最终写入/维护表分块检查点。当前契约为 `STATE_SCHEMA=7`、`RULES_VERSION=18`；执行缓存为 `BACKEND_CACHE_SCHEMA=18`、工作流修订 `2026-08-25-capability-selection-v1`，旧状态不迁移。
 
 `.archive-temp/execution-cache.json` 保存详细计划、实际编号路径和执行结果。
 

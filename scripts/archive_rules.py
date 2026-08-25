@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-STATE_SCHEMA = 6
-BACKEND_CACHE_SCHEMA = 17
-RULES_VERSION = 17
-WORKFLOW_REVISION = "2026-08-13-metadata-title-extraction"
+STATE_SCHEMA = 7
+BACKEND_CACHE_SCHEMA = 18
+RULES_VERSION = 18
+WORKFLOW_REVISION = "2026-08-25-capability-selection-v1"
 STATE_NAME = ".archive-state.json"
 BACKEND_CACHE_NAME = "execution-cache.json"
 TEMP_DIR_NAME = ".archive-temp"

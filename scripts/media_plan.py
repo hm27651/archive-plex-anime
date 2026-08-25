@@ -6,11 +6,16 @@ from pathlib import Path
 from typing import Any
 
 from archive_rules import LOCAL_ONLY_REQUESTABLE_STEPS, validate_plan
+from capabilities import (
+    apply_final_sinks,
+    available_capabilities,
+    legacy_steps_to_capabilities,
+    resolve_capabilities,
+)
 from movie_plan import build_movie_archive_only_plan, build_movie_plan
 from tv_plan import build_tv_archive_only_plan, build_tv_plan
 
 
-STEP_ORDER = ["inspect", "movie-audio", "subtitle", "remux", "package", "review", "finalize", "cleanup"]
 ROUTE_BRANCH = {"tv": "anime", "movie": "movie"}
 LOCAL_ONLY_UNSUPPORTED_STEPS = {"review"}
 
@@ -34,28 +39,19 @@ def local_only_request_issues(requested: list[str] | None) -> list[dict[str, Any
 
 
 def _selected_steps(task: str, plan: dict[str, Any], requested: list[str] | None) -> list[str]:
-    available = {
-        "inspect",
-        *( ["movie-audio"] if plan.get("movieAudioPlans") else [] ),
-        *( ["subtitle"] if plan.get("subtitleGroups") else [] ),
-        *( ["remux"] if plan.get("remuxJobs") else [] ),
-        *( ["package"] if plan.get("package") else [] ),
-    }
-    if task == "local-only":
-        wanted = set(requested or [])
-        wanted.add("inspect")
-        if "package" in wanted and "subtitle" in available:
-            wanted.add("subtitle")
-        if "remux" in wanted and "subtitle" in available:
-            wanted.add("subtitle")
-        if "remux" in wanted and "movie-audio" in available:
-            wanted.add("movie-audio")
-        return [step for step in STEP_ORDER if step in available and step in wanted]
-    return [
-        step
-        for step in STEP_ORDER
-        if step in available or step in {"review", "finalize", "cleanup"}
-    ]
+    """Compatibility wrapper for callers that still supply local-only steps."""
+
+    synthetic_manifest = {"discovery": {"libraryTarget": {}}}
+    available = available_capabilities(plan, synthetic_manifest)
+    resolved = resolve_capabilities(
+        selection_mode="preset",
+        preset=task,
+        requested=legacy_steps_to_capabilities(requested),
+        entrypoint="cli",
+        branch="movie" if plan.get("movieAudioPlans") else "tv",
+        available=available,
+    )
+    return resolved["selected_steps"]
 
 
 def build_plan(work: Path, manifest: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
@@ -118,9 +114,24 @@ def build_plan(work: Path, manifest: dict[str, Any], state: dict[str, Any]) -> d
             plan["preferredLibrary"] = resolved_library
             plan["libraryTarget"] = {**resolution, "library": resolved_library}
             plan.setdefault("final", {})["mode"] = resolution.get("mode") or plan.get("final", {}).get("mode")
+    selection_mode = str(state.get("selection_mode") or "preset")
+    entrypoint = str(state.get("entrypoint") or "cli")
+    requested_capabilities = state.get("requested_capabilities")
+    if requested_capabilities is None:
+        requested_capabilities = legacy_steps_to_capabilities(state.get("requested_steps"))
+    resolution = resolve_capabilities(
+        selection_mode=selection_mode,
+        preset=str(state.get("preset") or task),
+        requested=requested_capabilities,
+        entrypoint=entrypoint,
+        branch=branch,
+        available=available_capabilities(plan, manifest),
+    )
+    issues.extend(resolution["issues"])
+    apply_final_sinks(plan, resolution["final_sinks"])
     if plan:
         issues.extend(validate_plan(work.resolve(), branch, task, plan))
-    selected = _selected_steps(task, plan, state.get("requested_steps"))
+    selected = resolution["selected_steps"]
     if task == "local-only":
         requested = list(state.get("requested_steps") or [])
         valid = set(LOCAL_ONLY_REQUESTABLE_STEPS)
@@ -134,8 +145,18 @@ def build_plan(work: Path, manifest: dict[str, Any], state: dict[str, Any]) -> d
         issues.extend(local_only_request_issues(requested))
         for step in sorted((set(requested) & valid) - available):
             issues.append({"code": "LOCAL_STEP_UNAVAILABLE", "step": step})
-    if task != "local-only" and not plan.get("final", {}).get("video"):
+    if task != "local-only" and not resolution["final_sinks"] and selection_mode == "preset":
         issues.append({"code": "EXECUTABLE_PLAN_REQUIRED"})
-    elif selected == ["inspect"]:
+    elif selected == ["inspect"] and selection_mode == "preset":
         issues.append({"code": "EXECUTABLE_PLAN_REQUIRED"})
-    return {**generated, "issues": issues, "selected_steps": selected, "metadata": metadata}
+    return {
+        **generated,
+        "issues": issues,
+        "selected_steps": selected,
+        "metadata": metadata,
+        "requested_capabilities": resolution["requested_capabilities"],
+        "resolved_capabilities": resolution["resolved_capabilities"],
+        "auto_added_capabilities": resolution["auto_added_capabilities"],
+        "unavailable_capabilities": resolution["unavailable_capabilities"],
+        "final_sinks": resolution["final_sinks"],
+    }

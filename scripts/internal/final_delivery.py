@@ -524,7 +524,13 @@ def execute_final_delivery(
         _save_final_checkpoint(work, batch_id, "tracker", checkpoint_lock)
         return output
 
-    workers = {"final-video": run_video, "final-zip": run_zip, "final-tracker": run_tracker}
+    workers: dict[str, Callable[[], dict[str, Any]]] = {}
+    if final.get("video"):
+        workers["final-video"] = run_video
+    if final.get("zip"):
+        workers["final-zip"] = run_zip
+    if final.get("trackerPlan"):
+        workers["final-tracker"] = run_tracker
     completed: dict[str, Any] = {}
     failed: dict[str, str] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:

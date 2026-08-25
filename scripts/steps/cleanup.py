@@ -59,7 +59,12 @@ def run(context):
                 or checkpoint.get("size") != expected
             ):
                 return result("FAILED", f"cleanup destination checkpoint is no longer valid: {destination}")
-    if checkpoints.get("tracker", {}).get("status") != "COMPLETE":
+    tracker_required = (
+        "tracker" in state.get("final_sinks", [])
+        if "final_sinks" in state
+        else state.get("task") != "local-only"
+    )
+    if tracker_required and checkpoints.get("tracker", {}).get("status") != "COMPLETE":
         return result("FAILED", "cleanup requires completed tracker checkpoint")
     shutil.rmtree(resolved, onerror=_retry_readonly_removal)
     return result("COMPLETE", "task directory deleted")

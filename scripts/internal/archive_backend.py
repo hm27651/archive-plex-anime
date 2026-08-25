@@ -29,6 +29,7 @@ from archive_rules import (
     route_branch,
     temporary_path,
 )
+from capabilities import CAPABILITY_ORDER
 from common import (
     configure_utf8_stdio,
     decode_output,
@@ -868,6 +869,21 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(LOCAL_ONLY_REQUESTABLE_STEPS),
         help="selected local-only capability; repeat for multiple steps",
     )
+    inspect.add_argument(
+        "--selected-capability",
+        action="append",
+        default=[],
+        choices=list(CAPABILITY_ORDER),
+        help="resolved public capability; repeat for multiple capabilities",
+    )
+    inspect.add_argument(
+        "--selected-final-sink",
+        action="append",
+        default=[],
+        choices=["video", "subtitle_zip", "tracker"],
+        help="resolved final output sink; repeat for multiple sinks",
+    )
+    inspect.add_argument("--kdocs-tracker", action="store_true", help="enable KDocs checks for this entrypoint and selection")
     inspect.set_defaults(handler=command_inspect)
 
     configure = subparsers.add_parser("configure")

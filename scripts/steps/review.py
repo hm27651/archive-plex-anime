@@ -37,7 +37,7 @@ def run(context):
             "library": final.get("library"),
             "video_root": video_root,
             "zip": str(zip_jobs[0].get("destination", "")) if zip_jobs else "",
-            "tracker_column": str(tracker_plan.get("column") or final.get("library") or ""),
+            "tracker_column": str(tracker_plan.get("column") or "") if tracker_plan else "",
             "operation": final.get("mode"),
             "batch_id": final.get("batchId"),
             "batch_digest": final.get("batchDigest") or final_payload.get("batchDigest"),

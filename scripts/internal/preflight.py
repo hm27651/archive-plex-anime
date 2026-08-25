@@ -191,17 +191,28 @@ def inspection_required_tools(
 
     task = str(getattr(args, "task_mode", "complete-archive"))
     requested = {str(value) for value in (getattr(args, "requested_step", None) or [])}
+    selected = {str(value) for value in (getattr(args, "selected_capability", None) or [])}
     tools = {"mediainfo"}
-    if task != "local-only" or "remux" in requested or not has_external_subtitles:
+    if selected:
+        needs_mkvmerge = bool(selected & {"movie-audio", "remux", "video-delivery"}) or (
+            not has_external_subtitles
+            and bool(selected & {"subtitle", "subtitle-package", "subtitle-delivery"})
+        )
+    else:
+        needs_mkvmerge = task != "local-only" or "remux" in requested or not has_external_subtitles
+    if needs_mkvmerge:
         tools.add("mkvmerge")
-    subtitle_processing = task in {"complete-archive", "replacement"} or bool(
-        requested & {"subtitle", "remux", "package"}
+    subtitle_processing = (
+        bool(selected & {"subtitle", "remux", "subtitle-package", "subtitle-delivery", "video-delivery"})
+        if selected
+        else task in {"complete-archive", "replacement"} or bool(requested & {"subtitle", "remux", "package"})
     )
     if has_external_subtitles and subtitle_processing:
         tools.add("assfonts")
     if getattr(args, "movie_audio_replacement", False):
         tools.update({"mkvmerge", "ffprobe", "ffmpeg", "mkvinfo"})
-    if task != "local-only" and bool(config.get("tracker", {}).get("enabled")):
+    kdocs_selected = bool(getattr(args, "kdocs_tracker", task != "local-only"))
+    if kdocs_selected and bool(config.get("tracker", {}).get("enabled")):
         tools.add("kdocs-cli")
     return sorted(tools)
 
@@ -463,20 +474,27 @@ def execute_inspection(
         subtitles.extend(resolve_path(value) for value in workspace_embedded.get("extractedSubtitles", []))
 
     library_preflight = None
-    if route.get("status") == "OK" and args.task_mode != "local-only":
+    selected_sinks = set(getattr(args, "selected_final_sink", None) or [])
+    has_explicit_sinks = hasattr(args, "selected_final_sink")
+    needs_library = bool(selected_sinks) if has_explicit_sinks else args.task_mode != "local-only"
+    if route.get("status") == "OK" and needs_library:
         media_branch = "tv" if route.get("branch") == "anime" else "movie"
         default_key = "library" if media_branch == "tv" else "movieLibrary"
         fallback_library = "Anime3" if media_branch == "tv" else "Movie3"
         preferred = str(config.get("defaults", {}).get(default_key, fallback_library))
         lookup_title = args.title or metadata.get("suggestedDecisions", {}).get("title") or work.name
+        kdocs_selected = bool(getattr(args, "kdocs_tracker", args.task_mode != "local-only"))
+        library_config = copy.deepcopy(config)
+        if not kdocs_selected:
+            library_config.setdefault("tracker", {})["enabled"] = False
         library_key = _component_key({
             "branch": media_branch,
             "title": lookup_title,
             "preferred": preferred,
             "storageTargets": config.get("storageTargets", {}),
             "plexLibraries": config.get("plexLibraries", {}),
-            "tracker": config.get("tracker", {}),
-            "trackerTool": _tool_identity(config, "kdocs-cli"),
+            "tracker": library_config.get("tracker", {}),
+            "trackerTool": _tool_identity(config, "kdocs-cli") if kdocs_selected else None,
         })
         old_library = previous_discovery.get("libraryTarget")
         if (
@@ -487,7 +505,7 @@ def execute_inspection(
             library_preflight = copy.deepcopy(old_library)
             reused_components.add("libraryTarget")
         else:
-            lookup = library_inspector(config, lookup_title, media_branch, preferred)
+            lookup = library_inspector(library_config, lookup_title, media_branch, preferred)
             tracker_state = lookup.get("trackerState", {})
             tracker_cache = {
                 key: copy.deepcopy(tracker_state[key])

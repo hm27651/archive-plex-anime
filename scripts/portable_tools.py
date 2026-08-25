@@ -363,7 +363,7 @@ def build(tool_id: str, architecture: str, output_dir: Path) -> dict[str, Any]:
             "platform": "linux",
             "architecture": architecture,
             "native_machine": machine,
-            "native_verified": True,
+            "native_built": True,
             "filename": filename,
             "sha256": _sha256(artifact),
             "size": artifact.stat().st_size,

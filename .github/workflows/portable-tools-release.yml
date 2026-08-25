@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  build-and-verify:
+  build:
     strategy:
       fail-fast: false
       matrix:
@@ -38,12 +38,6 @@ jobs:
               --architecture "${{ matrix.architecture }}" \
               --output dist
           done
-      - name: Run native capability contract
-        run: >-
-          python3 -B scripts/verify_portable_tools.py
-          --architecture "${{ matrix.architecture }}"
-          --artifacts dist
-          --output "dist/capability-report-linux-${{ matrix.architecture }}.json"
       - uses: actions/upload-artifact@v4
         with:
           name: portable-tools-linux-${{ matrix.architecture }}
@@ -51,8 +45,42 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  verify-clean-runtime:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: python:3.11-slim-bookworm
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: portable-tools-linux-${{ matrix.architecture }}
+          path: dist
+      - name: Run native capability contract in clean Hub base runtime
+        run: >-
+          python3 -B scripts/verify_portable_tools.py
+          --architecture "${{ matrix.architecture }}"
+          --artifacts dist
+          --output "capability-report-linux-${{ matrix.architecture }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-tools-report-linux-${{ matrix.architecture }}
+          path: capability-report-linux-${{ matrix.architecture }}.json
+          if-no-files-found: error
+          retention-days: 14
+
   release:
-    needs: build-and-verify
+    needs: verify-clean-runtime
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -60,7 +88,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: portable-tools-linux-*
+          pattern: portable-tools-*
           path: dist
           merge-multiple: true
       - name: Validate native reports and prepare release index

@@ -4,6 +4,17 @@
 
 当前由同一规则核心提供 CLI、独立 Skill 和 Hub 适配能力：四个原有工作流作为预置保留，也可按需选择公开能力并自动补齐依赖。CLI/Skill 保留 KDocs；Hub 入口不展示、不检查、不执行 KDocs。可用 `python scripts/workflow.py capabilities --entrypoint cli --branch tv` 查看能力目录。
 
+工具名称、官方下载信息、固定制品与能力 ID 统一来自 `toolchain/manifest.json`。第一阶段 CLI 只查看、检查、验证已有路径和导出投影，不会自动下载或安装工具：
+
+```powershell
+python scripts/workflow.py tools list --entrypoint cli --json
+python scripts/workflow.py tools check --entrypoint hub --tool ffmpeg --json
+python scripts/workflow.py tools use-path mediainfo "D:\Tools\MediaInfo.exe" --json
+python scripts/workflow.py tools export --entrypoint hub --output "D:\Temp\archive-tools-hub.json" --json
+```
+
+Hub 投影自动排除 KDocs 和内部字体转换工具；CLI 与独立 Skill 仍可按需使用 KDocs。
+
 新会话请先阅读：
 
 - [需求基线](docs/requirements.md)：产品目标、长期规则、执行边界和验收口径；

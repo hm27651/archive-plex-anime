@@ -14,11 +14,16 @@
   "plexLibraries": {},
   "tools": {
     "python": "",
+    "mediainfo_path": "",
     "mediainfo": "",
+    "mkvtoolnix_dir": "",
     "mkvmerge": "",
     "mkvinfo": "",
+    "mkvextract": "",
+    "assfonts_path": "",
     "assfonts": "",
     "otf2ttf": "",
+    "ffmpeg_dir": "",
     "ffmpeg": "",
     "ffprobe": "",
     "kdocs-cli": ""

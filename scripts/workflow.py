@@ -27,6 +27,7 @@ from capabilities import (
 from common import WorkflowIssue, backend_cache_path, backend_command, configure_utf8_stdio, load_config, load_state, read_text, save_state
 from media_plan import build_plan, local_only_request_issues
 from plan_common import update_release_history
+from toolchain import ToolchainError, check_tools, export_projection, list_tools, update_tool_path
 
 
 TASKS = set(PRESETS)
@@ -488,6 +489,20 @@ def approve(args: argparse.Namespace) -> dict:
     return {"status": "COMPLETE", "summary": f"{args.kind} approval recorded", "state": state}
 
 
+def run_tools(args: argparse.Namespace) -> dict:
+    if args.tools_command == "list":
+        return list_tools(args.entrypoint)
+    if args.tools_command == "check":
+        return check_tools(args.entrypoint, args.tool)
+    if args.tools_command == "use-path":
+        return update_tool_path(args.tool_id, Path(args.path))
+    if args.tools_command == "export":
+        output = Path(args.output).resolve(strict=False)
+        projection = export_projection(args.entrypoint, output)
+        return {"status": "OK", "output": str(output), "projection": projection}
+    raise ToolchainError("TOOLS_COMMAND_UNKNOWN", f"unsupported tools command: {args.tools_command}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Plex archive workflow")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -502,6 +517,23 @@ def build_parser() -> argparse.ArgumentParser:
     catalog = sub.add_parser("capabilities")
     catalog.add_argument("--entrypoint", choices=["cli", "skill", "hub"], default="cli")
     catalog.add_argument("--branch", choices=["tv", "movie"])
+    tools = sub.add_parser("tools")
+    tools_sub = tools.add_subparsers(dest="tools_command", required=True)
+    tools_list = tools_sub.add_parser("list")
+    tools_list.add_argument("--entrypoint", choices=["cli", "skill", "hub"], default="cli")
+    tools_list.add_argument("--json", action="store_true", help="emit JSON (the public CLI always emits JSON)")
+    tools_check = tools_sub.add_parser("check")
+    tools_check.add_argument("--entrypoint", choices=["cli", "skill", "hub"], default="cli")
+    tools_check.add_argument("--tool", action="append", help="check one tool; may be repeated")
+    tools_check.add_argument("--json", action="store_true", help="emit JSON (the public CLI always emits JSON)")
+    tools_path = tools_sub.add_parser("use-path")
+    tools_path.add_argument("tool_id")
+    tools_path.add_argument("path")
+    tools_path.add_argument("--json", action="store_true", help="emit JSON (the public CLI always emits JSON)")
+    tools_export = tools_sub.add_parser("export")
+    tools_export.add_argument("--entrypoint", choices=["cli", "skill", "hub"], required=True)
+    tools_export.add_argument("--output", required=True)
+    tools_export.add_argument("--json", action="store_true", help="emit JSON (the public CLI always emits JSON)")
     status = sub.add_parser("status")
     status.add_argument("--work-dir")
     approval = sub.add_parser("approve-preflight")
@@ -526,6 +558,8 @@ def main(argv: list[str] | None = None) -> int:
             output = init_state(args)
         elif args.command == "capabilities":
             output = {"status": "OK", **capability_catalog(args.entrypoint, args.branch)}
+        elif args.command == "tools":
+            output = run_tools(args)
         elif args.command == "status":
             output = {"status": "OK", "state": load_task_state(work_dir(args))}
         elif args.command == "approve-preflight":
@@ -540,6 +574,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if output.get("status") not in {"FAILED", "NEEDS_USER"} else 2
     except WorkflowIssue as exc:
         print(json.dumps({"status": exc.status, "error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
+        return 2
+    except ToolchainError as exc:
+        print(
+            json.dumps({"status": "FAILED", "code": exc.code, "error": str(exc)}, ensure_ascii=False, indent=2),
+            file=sys.stderr,
+        )
         return 2
     except Exception as exc:
         print(json.dumps({"status": "FAILED", "error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)

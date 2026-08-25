@@ -29,6 +29,12 @@ description: Use when inspecting, organizing, subtitling, remuxing, packaging, a
 
 CLI 与本独立 Skill 保留 KDocs。作为 Hub 入口运行时必须使用 `--entrypoint hub`，能力目录、前检、配置和执行均不得出现 `kdocs-tracker`；不得由 Hub 自行补回维护表动作。
 
+## 工具清单与检查
+
+工具说明、入口范围、官方下载页、固定制品、SHA-256 和能力 ID 只来自 `toolchain/manifest.json`。使用 `python scripts/workflow.py tools list|check|use-path|export` 查看工具、检查最低能力、验证已有绝对路径或导出入口投影。第一阶段不自动下载或安装任何工具；缺少工具时向用户展示清单中的项目主页和下载页。
+
+媒体任务仍只检查本次所选能力需要的工具。Hub 工具投影自动排除 KDocs 和 otf2ttf；CLI 与本独立 Skill 继续按需使用它们。`use-path` 必须先通过全部最低能力检查再原子写入唯一配置，失败时保留原配置。
+
 ## 执行工作流
 
 先读取 [references/workflow.md](references/workflow.md)，再按分支读取：

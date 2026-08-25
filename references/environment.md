@@ -19,7 +19,7 @@ Movie 字幕归档：  paths.movieSubtitleArchiveRoot
 
 库位由 `storageTargets` 与 `plexLibraries` 映射。Anime1/2/3 和 Movie1/2/3 是维护表与计划器使用的逻辑库位名；实际盘符、NAS 路径和默认新归档库位由用户配置。
 
-工具来自配置的 `tools`：Python、MediaInfo CLI、MKVToolNix (`mkvmerge`/`mkvinfo`)、assfonts、otf2ttf、ffmpeg/ffprobe、KDocs CLI。inspect 按所选能力检查：普通任务不检查 FFmpeg/FFprobe/mkvinfo；它们只用于 Movie 原盘音轨洗版。assfonts 只在本次选择字幕处理且存在外挂/提取 ASS 时要求；otf2ttf 只在 assfonts 实际失败并命中 OTF/CFF 候选后检查；KDocs 只在启用维护表且任务包含最终写入时要求。`paths.fallbackFontDatabase` 指向 `fc-subs.db`；未填时默认使用完整字体库根目录下的同名文件。
+工具来自配置的 `tools`：Python、MediaInfo CLI、MKVToolNix (`mkvmerge`/`mkvinfo`/`mkvextract`)、assfonts、otf2ttf、ffmpeg/ffprobe、KDocs CLI。清单级路径使用 `mediainfo_path`、`mkvtoolnix_dir`、`ffmpeg_dir`、`assfonts_path`；`tools use-path` 验证成功后也会写入现有工作流使用的具体可执行路径。inspect 按所选能力检查：普通任务不检查 FFmpeg/FFprobe/mkvinfo；它们只用于 Movie 原盘音轨洗版。assfonts 只在本次选择字幕处理且存在外挂/提取 ASS 时要求；otf2ttf 只在 assfonts 实际失败并命中 OTF/CFF 候选后检查；KDocs 只在启用维护表且任务包含最终写入时要求。`paths.fallbackFontDatabase` 指向 `fc-subs.db`；未填时默认使用完整字体库根目录下的同名文件。
 
 `metadata` 默认启用 TMDB 主来源、TVDB 辅助来源及 TMDB 季序。`metadata.proxy` 只应用于这两个 API；空值表示显式直连。API 不是 `tools` 外部可执行文件，不参与工具存在性检查。四个预置默认选择元数据；自定义能力未包含 `metadata` 时完全不读取上述凭据或访问 API。自定义最终输出同时关闭元数据时，必须在决定中提供明确的 `title`。
 
@@ -36,7 +36,30 @@ Movie 字幕归档：  paths.movieSubtitleArchiveRoot
 
 将 [config.example.json](../config.example.json) 的字段填入 `%LOCALAPPDATA%\archive-plex-anime\config.json`。工具和路径可与本机不同，但字段语义、单配置模式和工作流不变；缺少当前任务所需能力时由 inspect 列出，用户自行安装或修正配置后重跑。
 
-## 统一 CLI
+## 工具清单 CLI
+
+`toolchain/manifest.json` 是工具名称、说明、官方下载页、固定制品和能力 ID 的唯一来源。以下命令只读取清单或检查已有工具；第一阶段不会下载、安装、更新或回退工具：
+
+```powershell
+# 工具缺失时仍可查看主页、下载页和固定制品
+python scripts/workflow.py tools list --entrypoint cli --json
+
+# 检查当前入口的全部工具，或只检查一个工具
+python scripts/workflow.py tools check --entrypoint cli --json
+python scripts/workflow.py tools check --entrypoint hub --tool ffmpeg --json
+
+# 先验证最低能力，再原子写入唯一配置；只接受绝对路径
+python scripts/workflow.py tools use-path mediainfo "D:\Tools\MediaInfo.exe" --json
+python scripts/workflow.py tools use-path mkvtoolnix "D:\Tools\MKVToolNix" --json
+
+# 生成供 Hub 或 Skill 导入的确定性只读投影
+python scripts/workflow.py tools export --entrypoint hub --output "D:\Temp\archive-tools-hub.json" --json
+python scripts/workflow.py tools export --entrypoint skill --output "D:\Temp\archive-tools-skill.json" --json
+```
+
+`hub` 入口只包含 MediaInfo CLI、MKVToolNix、FFmpeg/FFprobe 和 assfonts；不会解析、检查、显示或导出 KDocs。`cli`、`skill` 继续保留 KDocs。`use-path` 失败或写入后回读异常时恢复原配置；空值不会清除已有路径。所有外部命令均使用参数数组，中文、空格和 `&` 不经过 shell 拼接。
+
+## 媒体工作流 CLI
 
 以下示例中的 `$python` 取配置 `tools.python`，`$workflow` 指向 `scripts\workflow.py`：
 

@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import sys
+import tarfile
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -18,6 +19,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import toolchain  # noqa: E402
+import portable_tools  # noqa: E402
 import workflow  # noqa: E402
 
 
@@ -125,6 +127,45 @@ class ToolManifestTests(unittest.TestCase):
 
         self.assertEqual(toolchain.select_artifact(ffmpeg, "windows", "x64")["version"], "8.1.2-44-g7c533d0f86")
         self.assertIsNone(toolchain.select_artifact(ffmpeg, "linux", "amd64"))
+
+
+class PortableArchiveTests(unittest.TestCase):
+    def test_deterministic_tar_has_stable_bytes_and_normalized_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "package"
+            (source / "bin").mkdir(parents=True)
+            executable = source / "bin" / "工具"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
+            executable.chmod(0o755)
+            first = root / "first.tar.gz"
+            second = root / "second.tar.gz"
+
+            portable_tools.create_deterministic_tar(source, first)
+            executable.touch()
+            portable_tools.create_deterministic_tar(source, second)
+
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            with tarfile.open(first, "r:gz") as archive:
+                member = archive.getmember("bin/工具")
+            self.assertEqual((member.uid, member.gid, member.mtime, member.mode), (0, 0, 0, 0o755))
+
+    def test_portable_extraction_rejects_traversal_and_links(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, member in (
+                ("traversal.tar.gz", tarfile.TarInfo("../escape")),
+                ("link.tar.gz", tarfile.TarInfo("bin/link")),
+            ):
+                archive = root / name
+                if name.startswith("link"):
+                    member.type = tarfile.SYMTYPE
+                    member.linkname = "/etc/passwd"
+                with tarfile.open(archive, "w:gz") as output:
+                    output.addfile(member)
+                with self.subTest(name=name):
+                    with self.assertRaises(portable_tools.PortableToolError):
+                        portable_tools.extract_portable_tar(archive, root / f"extract-{name}")
 
 
 class ToolVersionTests(unittest.TestCase):

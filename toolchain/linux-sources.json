@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "debian_snapshot": "20260801T000000Z",
+  "debian_release": "bookworm",
+  "apt_tools": {
+    "mediainfo": {
+      "packages": ["mediainfo"],
+      "executables": ["mediainfo"]
+    },
+    "mkvtoolnix": {
+      "packages": ["mkvtoolnix"],
+      "executables": ["mkvmerge", "mkvinfo", "mkvextract"]
+    },
+    "ffmpeg": {
+      "packages": ["ffmpeg"],
+      "executables": ["ffmpeg", "ffprobe"]
+    }
+  },
+  "assfonts": {
+    "version": "0.7.3",
+    "source_commit": "b1659f3cbd45d3eb2a45048ffc48b81a3e5dcfac",
+    "runtime_packages": ["fontconfig", "fonts-dejavu-core"],
+    "executables": ["assfonts"],
+    "sources": {
+      "amd64": {
+        "url": "https://github.com/wyzdwdz/assfonts/releases/download/v0.7.3/assfonts-v0.7.3-x86_64-Linux.tar.gz",
+        "sha256": "c90e1e0f439296f41c5b9d1c434f029965ab0b9c1d02f41e33495cd9d7c45a62"
+      },
+      "arm64": {
+        "url": "https://github.com/wyzdwdz/assfonts/releases/download/v0.7.3/assfonts-v0.7.3-aarch64-Linux.tar.gz",
+        "sha256": "80d97854129a0d75ecda60533930654ed3c18a8183605a75b602f37bf23d8859"
+      }
+    }
+  }
+}

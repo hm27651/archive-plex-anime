@@ -1,0 +1,112 @@
+name: portable-tools-release
+
+on:
+  push:
+    tags:
+      - "portable-tools-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: debian:bookworm-slim
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned-build prerequisites
+        run: |
+          apt-get update
+          apt-get install --no-install-recommends -y ca-certificates python3 libc-bin
+      - name: Build portable archives
+        shell: bash
+        run: |
+          for tool in mediainfo mkvtoolnix ffmpeg assfonts; do
+            python3 -B scripts/portable_tools.py \
+              --tool "$tool" \
+              --architecture "${{ matrix.architecture }}" \
+              --output dist
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-tools-linux-${{ matrix.architecture }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-clean-runtime:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: python:3.11-slim-bookworm
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: portable-tools-linux-${{ matrix.architecture }}
+          path: dist
+      - name: Run native capability contract in clean Hub base runtime
+        run: >-
+          python3 -B scripts/verify_portable_tools.py
+          --architecture "${{ matrix.architecture }}"
+          --artifacts dist
+          --output "capability-report-linux-${{ matrix.architecture }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-tools-report-linux-${{ matrix.architecture }}
+          path: capability-report-linux-${{ matrix.architecture }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: verify-clean-runtime
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: portable-tools-*
+          path: dist
+          merge-multiple: true
+      - name: Validate native reports and prepare release index
+        run: >-
+          python3 -B scripts/portable_release.py prepare
+          --dist dist
+          --tag "${GITHUB_REF_NAME}"
+          --notes release-notes.md
+      - name: Publish immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          dist/*.tar.gz
+          dist/*.tar.gz.json
+          dist/capability-report-linux-*.json
+          dist/portable-tools-index.json
+          --repo "${GITHUB_REPOSITORY}"
+          --title "Portable tools ${GITHUB_REF_NAME}"
+          --notes-file release-notes.md
+          --verify-tag

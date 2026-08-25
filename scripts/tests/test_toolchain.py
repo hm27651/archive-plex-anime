@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import sys
+import tarfile
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -18,6 +19,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import toolchain  # noqa: E402
+import portable_tools  # noqa: E402
 import workflow  # noqa: E402
 
 
@@ -124,7 +126,110 @@ class ToolManifestTests(unittest.TestCase):
         ffmpeg = next(item for item in manifest["tools"] if item["tool_id"] == "ffmpeg")
 
         self.assertEqual(toolchain.select_artifact(ffmpeg, "windows", "x64")["version"], "8.1.2-44-g7c533d0f86")
-        self.assertIsNone(toolchain.select_artifact(ffmpeg, "linux", "amd64"))
+        self.assertEqual(toolchain.select_artifact(ffmpeg, "linux", "amd64")["architecture"], "amd64")
+        self.assertEqual(toolchain.select_artifact(ffmpeg, "linux", "arm64")["architecture"], "arm64")
+
+    def test_hub_tools_have_complete_platform_matrix(self):
+        manifest = toolchain.load_manifest()
+        expected = {("windows", "x64"), ("linux", "amd64"), ("linux", "arm64")}
+        hub_tools = [item for item in manifest["tools"] if "hub" in item["entrypoints"]]
+
+        self.assertEqual([item["tool_id"] for item in hub_tools], list(toolchain.HUB_TOOL_IDS))
+        for item in hub_tools:
+            with self.subTest(tool_id=item["tool_id"]):
+                self.assertEqual(
+                    {(artifact["platform"], artifact["architecture"]) for artifact in item["artifacts"]},
+                    expected,
+                )
+
+    def test_manifest_rejects_missing_hub_target_and_invalid_hub_scope(self):
+        manifest = toolchain.load_manifest()
+        missing = copy.deepcopy(manifest)
+        missing["tools"][0]["artifacts"] = [
+            item
+            for item in missing["tools"][0]["artifacts"]
+            if (item["platform"], item["architecture"]) != ("linux", "arm64")
+        ]
+        with self.assertRaises(toolchain.ToolchainError) as raised:
+            toolchain.validate_manifest(missing)
+        self.assertEqual(raised.exception.code, "MANIFEST_HUB_ARTIFACT_MISSING")
+
+        extra = copy.deepcopy(manifest)
+        extra["tools"][-1]["entrypoints"].append("hub")
+        with self.assertRaises(toolchain.ToolchainError) as raised:
+            toolchain.validate_manifest(extra)
+        self.assertEqual(raised.exception.code, "MANIFEST_HUB_SCOPE_INVALID")
+
+    def test_manifest_rejects_unsafe_or_mismatched_executable_paths(self):
+        manifest = toolchain.load_manifest()
+        cases = (
+            ("../mediainfo", "MANIFEST_ARTIFACT_PATH_UNSAFE"),
+            ("/bin/mediainfo", "MANIFEST_ARTIFACT_PATH_UNSAFE"),
+            ("C:/Tools/mediainfo", "MANIFEST_ARTIFACT_PATH_UNSAFE"),
+            ("bin\\mediainfo", "MANIFEST_ARTIFACT_PATH_UNSAFE"),
+            ("bin/mediainfo.exe", "MANIFEST_ARTIFACT_EXECUTABLE_MISMATCH"),
+            ("bin/not-mediainfo", "MANIFEST_ARTIFACT_EXECUTABLE_MISMATCH"),
+        )
+        for path, code in cases:
+            invalid = copy.deepcopy(manifest)
+            invalid["tools"][0]["artifacts"][1]["executable_paths"] = [path]
+            with self.subTest(path=path):
+                with self.assertRaises(toolchain.ToolchainError) as raised:
+                    toolchain.validate_manifest(invalid)
+                self.assertEqual(raised.exception.code, code)
+
+    def test_manifest_rejects_executable_count_and_order_mismatch(self):
+        manifest = toolchain.load_manifest()
+        invalid_count = copy.deepcopy(manifest)
+        invalid_count["tools"][1]["artifacts"][1]["executable_paths"] = ["bin/mkvmerge"]
+        with self.assertRaises(toolchain.ToolchainError) as raised:
+            toolchain.validate_manifest(invalid_count)
+        self.assertEqual(raised.exception.code, "MANIFEST_ARTIFACT_EXECUTABLE_COUNT")
+
+        invalid_order = copy.deepcopy(manifest)
+        invalid_order["tools"][2]["artifacts"][1]["executable_paths"] = ["bin/ffprobe", "bin/ffmpeg"]
+        with self.assertRaises(toolchain.ToolchainError) as raised:
+            toolchain.validate_manifest(invalid_order)
+        self.assertEqual(raised.exception.code, "MANIFEST_ARTIFACT_EXECUTABLE_MISMATCH")
+
+
+class PortableArchiveTests(unittest.TestCase):
+    def test_deterministic_tar_has_stable_bytes_and_normalized_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "package"
+            (source / "bin").mkdir(parents=True)
+            executable = source / "bin" / "工具"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
+            executable.chmod(0o755)
+            first = root / "first.tar.gz"
+            second = root / "second.tar.gz"
+
+            portable_tools.create_deterministic_tar(source, first)
+            executable.touch()
+            portable_tools.create_deterministic_tar(source, second)
+
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            with tarfile.open(first, "r:gz") as archive:
+                member = archive.getmember("bin/工具")
+            self.assertEqual((member.uid, member.gid, member.mtime, member.mode), (0, 0, 0, 0o755))
+
+    def test_portable_extraction_rejects_traversal_and_links(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, member in (
+                ("traversal.tar.gz", tarfile.TarInfo("../escape")),
+                ("link.tar.gz", tarfile.TarInfo("bin/link")),
+            ):
+                archive = root / name
+                if name.startswith("link"):
+                    member.type = tarfile.SYMTYPE
+                    member.linkname = "/etc/passwd"
+                with tarfile.open(archive, "w:gz") as output:
+                    output.addfile(member)
+                with self.subTest(name=name):
+                    with self.assertRaises(portable_tools.PortableToolError):
+                        portable_tools.extract_portable_tar(archive, root / f"extract-{name}")
 
 
 class ToolVersionTests(unittest.TestCase):

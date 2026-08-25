@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import wave
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from common import config_path, read_json, write_json_atomic
@@ -22,6 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = PROJECT_ROOT / "toolchain" / "manifest.json"
 SCHEMA_PATH = PROJECT_ROOT / "toolchain" / "manifest.schema.json"
 ENTRYPOINTS = ("cli", "skill", "hub")
+HUB_TOOL_IDS = ("mediainfo", "mkvtoolnix", "ffmpeg", "assfonts")
 SUPPORTED_PLATFORMS = {
     ("windows", "x64"),
     ("linux", "amd64"),
@@ -33,6 +34,26 @@ class ToolchainError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def _validate_artifact_path(tool_id: str, executable: str, raw_path: str, platform_name: str) -> None:
+    path = PurePosixPath(raw_path)
+    segments = raw_path.split("/")
+    if (
+        not raw_path
+        or "\\" in raw_path
+        or re.match(r"^[A-Za-z]:", raw_path) is not None
+        or path.is_absolute()
+        or any(part in {"", ".", ".."} for part in segments)
+    ):
+        raise ToolchainError("MANIFEST_ARTIFACT_PATH_UNSAFE", f"unsafe executable path for {tool_id}: {raw_path}")
+    expected = f"{executable}.exe" if platform_name == "windows" else executable
+    matches = path.name.casefold() == expected.casefold() if platform_name == "windows" else path.name == expected
+    if not matches:
+        raise ToolchainError(
+            "MANIFEST_ARTIFACT_EXECUTABLE_MISMATCH",
+            f"artifact executable for {tool_id} must end with {expected}: {raw_path}",
+        )
 
 
 def _json_key(value: Any) -> str:
@@ -120,6 +141,7 @@ def validate_manifest(manifest: dict[str, Any], schema: dict[str, Any] | None = 
 
     tool_ids: set[str] = set()
     artifact_keys: set[tuple[str, str, str]] = set()
+    hub_targets: dict[str, set[tuple[str, str]]] = {}
     for tool in manifest["tools"]:
         tool_id = str(tool["tool_id"])
         if tool_id in tool_ids:
@@ -138,6 +160,30 @@ def validate_manifest(manifest: dict[str, Any], schema: dict[str, Any] | None = 
             if key in artifact_keys:
                 raise ToolchainError("MANIFEST_ARTIFACT_DUPLICATE", f"duplicate artifact target: {key}")
             artifact_keys.add(key)
+            target = (key[1], key[2])
+            if target not in SUPPORTED_PLATFORMS:
+                raise ToolchainError("MANIFEST_ARTIFACT_TARGET_UNSUPPORTED", f"unsupported artifact target: {key}")
+            paths = artifact["executable_paths"]
+            executables = tool["executables"]
+            if len(paths) != len(executables):
+                raise ToolchainError(
+                    "MANIFEST_ARTIFACT_EXECUTABLE_COUNT",
+                    f"artifact executable count does not match {tool_id}: {key[1:]}",
+                )
+            for executable, raw_path in zip(executables, paths, strict=True):
+                _validate_artifact_path(tool_id, str(executable), str(raw_path), str(artifact["platform"]))
+            if tool_id in HUB_TOOL_IDS:
+                hub_targets.setdefault(tool_id, set()).add(target)
+
+    actual_hub_ids = tuple(tool["tool_id"] for tool in manifest["tools"] if "hub" in tool["entrypoints"])
+    if actual_hub_ids != HUB_TOOL_IDS:
+        raise ToolchainError("MANIFEST_HUB_SCOPE_INVALID", f"Hub tools must be exactly: {', '.join(HUB_TOOL_IDS)}")
+    for tool_id in HUB_TOOL_IDS:
+        missing = sorted(SUPPORTED_PLATFORMS - hub_targets.get(tool_id, set()))
+        if missing:
+            raise ToolchainError(
+                "MANIFEST_HUB_ARTIFACT_MISSING", f"missing Hub artifact targets for {tool_id}: {missing}"
+            )
     return manifest
 
 

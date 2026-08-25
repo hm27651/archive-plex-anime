@@ -1,33 +1,30 @@
 {
   "schema_version": 1,
   "manifest_version": "1.1.0",
-  "generated_contract_version": 1,
+  "source_version": "eb5c1fbc277fe3de3d88ee9df7c92551e17eacc0a1e03de33e1fae9de5e3d89e",
+  "source_commit": "00eb36dcb124048013e5774111081072e59bb7a6",
+  "entrypoint": "hub",
   "tools": [
     {
-      "tool_id": "mediainfo",
+      "id": "mediainfo",
       "name": "MediaInfo CLI",
       "purpose": "读取视频、音频和字幕轨道资料",
-      "entrypoints": [
-        "cli",
-        "skill",
-        "hub"
-      ],
+      "project_url": "https://github.com/MediaArea/MediaInfo",
+      "download_url": "https://mediaarea.net/en/MediaInfo/Download",
+      "binary_source_url": null,
+      "license": "BSD-2-Clause",
       "path_kind": "file",
       "path_setting": "mediainfo_path",
       "executables": [
         "mediainfo"
       ],
-      "project_url": "https://github.com/MediaArea/MediaInfo",
-      "download_page_url": "https://mediaarea.net/en/MediaInfo/Download",
-      "binary_source_url": null,
-      "license": "BSD-2-Clause",
-      "capability_checks": [
+      "capabilities": [
         {
-          "capability_id": "version",
+          "id": "version",
           "label": "版本读取"
         },
         {
-          "capability_id": "media_json",
+          "id": "media_json",
           "label": "读取媒体资料"
         }
       ],
@@ -74,14 +71,13 @@
       ]
     },
     {
-      "tool_id": "mkvtoolnix",
+      "id": "mkvtoolnix",
       "name": "MKVToolNix",
       "purpose": "检查、提取和重新封装 MKV",
-      "entrypoints": [
-        "cli",
-        "skill",
-        "hub"
-      ],
+      "project_url": "https://codeberg.org/mbunkus/mkvtoolnix",
+      "download_url": "https://mkvtoolnix.download/downloads.html",
+      "binary_source_url": null,
+      "license": "GPL-2.0-or-later",
       "path_kind": "directory",
       "path_setting": "mkvtoolnix_dir",
       "executables": [
@@ -89,25 +85,21 @@
         "mkvinfo",
         "mkvextract"
       ],
-      "project_url": "https://codeberg.org/mbunkus/mkvtoolnix",
-      "download_page_url": "https://mkvtoolnix.download/downloads.html",
-      "binary_source_url": null,
-      "license": "GPL-2.0-or-later",
-      "capability_checks": [
+      "capabilities": [
         {
-          "capability_id": "version",
+          "id": "version",
           "label": "版本读取"
         },
         {
-          "capability_id": "identify",
+          "id": "identify",
           "label": "识别 MKV"
         },
         {
-          "capability_id": "inspect",
+          "id": "inspect",
           "label": "检查封装"
         },
         {
-          "capability_id": "extract",
+          "id": "extract",
           "label": "提取附件"
         }
       ],
@@ -160,35 +152,30 @@
       ]
     },
     {
-      "tool_id": "ffmpeg",
+      "id": "ffmpeg",
       "name": "FFmpeg / FFprobe",
       "purpose": "读取原盘音轨并验证固定音频偏移",
-      "entrypoints": [
-        "cli",
-        "skill",
-        "hub"
-      ],
+      "project_url": "https://ffmpeg.org/",
+      "download_url": "https://ffmpeg.org/download.html",
+      "binary_source_url": "https://github.com/BtbN/FFmpeg-Builds/releases",
+      "license": "LGPL-2.1-or-later",
       "path_kind": "directory",
       "path_setting": "ffmpeg_dir",
       "executables": [
         "ffmpeg",
         "ffprobe"
       ],
-      "project_url": "https://ffmpeg.org/",
-      "download_page_url": "https://ffmpeg.org/download.html",
-      "binary_source_url": "https://github.com/BtbN/FFmpeg-Builds/releases",
-      "license": "LGPL-2.1-or-later",
-      "capability_checks": [
+      "capabilities": [
         {
-          "capability_id": "version",
+          "id": "version",
           "label": "版本读取"
         },
         {
-          "capability_id": "pcm_decode",
+          "id": "pcm_decode",
           "label": "PCM 解码"
         },
         {
-          "capability_id": "probe",
+          "id": "probe",
           "label": "读取音轨"
         }
       ],
@@ -238,30 +225,25 @@
       ]
     },
     {
-      "tool_id": "assfonts",
+      "id": "assfonts",
       "name": "assfonts",
       "purpose": "为 ASS 字幕生成字体子集",
-      "entrypoints": [
-        "cli",
-        "skill",
-        "hub"
-      ],
+      "project_url": "https://github.com/wyzdwdz/assfonts",
+      "download_url": "https://github.com/wyzdwdz/assfonts/releases",
+      "binary_source_url": null,
+      "license": "GPL-3.0",
       "path_kind": "file",
       "path_setting": "assfonts_path",
       "executables": [
         "assfonts"
       ],
-      "project_url": "https://github.com/wyzdwdz/assfonts",
-      "download_page_url": "https://github.com/wyzdwdz/assfonts/releases",
-      "binary_source_url": null,
-      "license": "GPL-3.0",
-      "capability_checks": [
+      "capabilities": [
         {
-          "capability_id": "version",
+          "id": "version",
           "label": "版本读取"
         },
         {
-          "capability_id": "subtitle_subset",
+          "id": "subtitle_subset",
           "label": "字幕字体子集化"
         }
       ],
@@ -306,56 +288,6 @@
           ]
         }
       ]
-    },
-    {
-      "tool_id": "kdocs-cli",
-      "name": "KDocs CLI",
-      "purpose": "更新 CLI 与独立 Skill 的 Plex 维护表",
-      "entrypoints": [
-        "cli",
-        "skill"
-      ],
-      "path_kind": "file",
-      "path_setting": "kdocs-cli",
-      "executables": [
-        "kdocs-cli"
-      ],
-      "project_url": "https://www.kdocs.cn/",
-      "download_page_url": "https://www.kdocs.cn/",
-      "binary_source_url": null,
-      "license": "Proprietary",
-      "capability_checks": [
-        {
-          "capability_id": "version",
-          "label": "版本读取"
-        }
-      ],
-      "artifacts": []
-    },
-    {
-      "tool_id": "otf2ttf",
-      "name": "otf2ttf",
-      "purpose": "在字体恢复失败后转换 OTF/CFF 字体",
-      "entrypoints": [
-        "cli",
-        "skill"
-      ],
-      "path_kind": "file",
-      "path_setting": "otf2ttf",
-      "executables": [
-        "otf2ttf"
-      ],
-      "project_url": "https://github.com/awesometoolbox/otf2ttf",
-      "download_page_url": "https://pypi.org/project/otf2ttf/",
-      "binary_source_url": null,
-      "license": "MIT",
-      "capability_checks": [
-        {
-          "capability_id": "version",
-          "label": "命令可用性"
-        }
-      ],
-      "artifacts": []
     }
   ]
 }

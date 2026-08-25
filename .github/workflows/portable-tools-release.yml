@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  build-single-linux:
     strategy:
       fail-fast: false
       matrix:
@@ -45,8 +45,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  verify-clean-runtime:
-    needs: build
+  verify-single-linux:
+    needs: build-single-linux
     strategy:
       fail-fast: false
       matrix:
@@ -66,7 +66,7 @@ jobs:
         with:
           name: portable-tools-linux-${{ matrix.architecture }}
           path: dist
-      - name: Run native capability contract in clean Hub base runtime
+      - name: Run native single-tool capability contract
         run: >-
           python3 -B scripts/verify_portable_tools.py
           --architecture "${{ matrix.architecture }}"
@@ -79,8 +79,136 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build-toolset-linux:
+    needs: verify-single-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: python:3.11-slim-bookworm
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: portable-tools-linux-${{ matrix.architecture }}
+          path: input
+      - name: Assemble namespaced Linux Hub toolset
+        run: >-
+          python3 -B scripts/hub_toolset.py
+          --platform linux
+          --architecture "${{ matrix.architecture }}"
+          --version "${{ github.ref_name }}"
+          --input input
+          --output dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hub-toolset-linux-${{ matrix.architecture }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  build-toolset-windows:
+    runs-on: windows-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Fetch fixed Windows inputs and assemble Hub toolset
+        run: >-
+          python -B scripts/hub_toolset.py
+          --platform windows
+          --architecture x64
+          --version "${{ github.ref_name }}"
+          --input input
+          --output dist
+          --fetch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hub-toolset-windows-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-toolset-linux:
+    needs: build-toolset-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: python:3.11-slim-bookworm
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: hub-toolset-linux-${{ matrix.architecture }}
+          path: dist
+      - name: Run native Hub toolset checks in clean runtime
+        run: >-
+          python3 -B scripts/verify_portable_tools.py
+          --toolset
+          --platform linux
+          --architecture "${{ matrix.architecture }}"
+          --artifacts dist
+          --output "capability-report-hub-toolset-linux-${{ matrix.architecture }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hub-toolset-report-linux-${{ matrix.architecture }}
+          path: capability-report-hub-toolset-linux-${{ matrix.architecture }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-toolset-windows:
+    needs: build-toolset-windows
+    runs-on: windows-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: hub-toolset-windows-x64
+          path: dist
+      - name: Run native Windows Hub toolset checks
+        run: >-
+          python -B scripts/verify_portable_tools.py
+          --toolset
+          --platform windows
+          --architecture x64
+          --artifacts dist
+          --output capability-report-hub-toolset-windows-x64.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hub-toolset-report-windows-x64
+          path: capability-report-hub-toolset-windows-x64.json
+          if-no-files-found: error
+          retention-days: 14
+
   release:
-    needs: verify-clean-runtime
+    needs: [verify-single-linux, verify-toolset-linux, verify-toolset-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -88,10 +216,20 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: portable-tools-*
+          pattern: portable-tools-linux-*
           path: dist
           merge-multiple: true
-      - name: Validate native reports and prepare release index
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: portable-tools-report-linux-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hub-toolset-*
+          path: dist
+          merge-multiple: true
+      - name: Validate reports and prepare release index
         run: >-
           python3 -B scripts/portable_release.py prepare
           --dist dist
@@ -103,9 +241,8 @@ jobs:
         run: >-
           gh release create "${GITHUB_REF_NAME}"
           dist/*.tar.gz
-          dist/*.tar.gz.json
-          dist/capability-report-linux-*.json
-          dist/portable-tools-index.json
+          dist/*.zip
+          dist/*.json
           --repo "${GITHUB_REPOSITORY}"
           --title "Portable tools ${GITHUB_REF_NAME}"
           --notes-file release-notes.md

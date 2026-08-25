@@ -14,6 +14,7 @@ from typing import Any
 
 import portable_tools
 import toolchain
+import hub_toolset
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -98,14 +99,113 @@ def verify(architecture: str, artifacts: Path) -> dict[str, Any]:
     }
 
 
+def verify_toolset(platform_name: str, architecture: str, artifacts: Path) -> dict[str, Any]:
+    hub_toolset._native_target(platform_name, architecture)
+    extension = "zip" if platform_name == "windows" else "tar.gz"
+    filename = f"hub-toolset-{platform_name}-{architecture}.{extension}"
+    archive = artifacts / filename
+    metadata = _read_json(artifacts / f"{filename}.json")
+    if (
+        metadata.get("platform") != platform_name
+        or metadata.get("architecture") != architecture
+        or metadata.get("tool_ids") != list(TOOL_IDS)
+        or metadata.get("sha256") != portable_tools._sha256(archive)
+        or metadata.get("size") != archive.stat().st_size
+    ):
+        raise portable_tools.PortableToolError(f"Hub toolset metadata mismatch: {filename}")
+    manifest = _read_json(PROJECT_ROOT / "toolchain" / "manifest.json")
+    definitions = {item["tool_id"]: item for item in manifest["tools"]}
+    with tempfile.TemporaryDirectory(prefix=f"archive-hub-toolset-check-{architecture}-") as temporary:
+        root = Path(temporary) / "中文 & Hub 工具集"
+        portable_tools.extract_portable_archive(archive, root, extension)
+        toolset = _read_json(root / str(metadata["manifest_path"]))
+        if (
+            toolset.get("schema_version") != 1
+            or toolset.get("toolset_id") != "hub"
+            or toolset.get("platform") != platform_name
+            or toolset.get("architecture") != architecture
+            or toolset.get("tool_ids") != list(TOOL_IDS)
+        ):
+            raise portable_tools.PortableToolError("Hub toolset.json contract is invalid")
+        for relative in [*metadata["fixture_paths"], *metadata["license_paths"]]:
+            if toolchain._safe_relative_path(str(relative)) is None or not (root / str(relative)).is_file():
+                raise portable_tools.PortableToolError(f"Hub toolset declared file is missing or unsafe: {relative}")
+        fixture = root / str(toolset["fixtures"]["assfonts_test_font"]["path"])
+        if not fixture.is_file():
+            raise portable_tools.PortableToolError("Hub toolset assfonts fixture is missing")
+        results: list[dict[str, Any]] = []
+        records = toolset.get("tools") or []
+        if [item.get("id") for item in records if isinstance(item, dict)] != list(TOOL_IDS):
+            raise portable_tools.PortableToolError("Hub toolset tool order or scope is invalid")
+        for record in records:
+            tool_id = str(record["id"])
+            definition = definitions[tool_id]
+            commands = record.get("commands") or {}
+            if list(commands) != definition["executables"]:
+                raise portable_tools.PortableToolError(f"Hub toolset command order is invalid: {tool_id}")
+            paths = {name: root / str(relative) for name, relative in commands.items()}
+            for name, path in paths.items():
+                if toolchain._safe_relative_path(str(commands[name])) is None or not path.is_file():
+                    raise portable_tools.PortableToolError(f"Hub toolset command is missing or unsafe: {tool_id}/{name}")
+                if platform_name == "linux" and not path.stat().st_mode & 0o111:
+                    raise portable_tools.PortableToolError(f"Hub toolset command is not executable: {tool_id}/{name}")
+            if platform_name == "linux":
+                first = next(iter(paths.values()))
+                parts = Path(first.relative_to(root)).parts
+                package_root = root.joinpath(*parts[:3])
+                _check_dependencies(package_root, list(definition["executables"]))
+            candidate = next(iter(paths.values())) if definition["path_kind"] == "file" else next(iter(paths.values())).parent
+            original_font_check = toolchain._font_for_check
+            if tool_id == "assfonts":
+                toolchain._font_for_check = lambda: (fixture, str(toolset["fixtures"]["assfonts_test_font"]["family"]))
+            try:
+                checked = toolchain.check_tool(definition, config={}, candidate=candidate)
+            finally:
+                toolchain._font_for_check = original_font_check
+            if checked["status"] != "ready":
+                failures = [
+                    f"{item['capability_id']}: {item['reason']}"
+                    for item in checked.get("capabilities", [])
+                    if item.get("status") != "ready"
+                ]
+                raise portable_tools.PortableToolError(
+                    f"Hub toolset {tool_id} capability check failed: {'; '.join(failures)}"
+                )
+            results.append(
+                {
+                    "tool_id": tool_id,
+                    "version": checked["installed_version"],
+                    "source": "bundled",
+                    "capabilities": checked["capabilities"],
+                }
+            )
+    return {
+        "schema_version": 1,
+        "kind": "hub_toolset",
+        "platform": platform_name,
+        "architecture": architecture,
+        "native_verified": True,
+        "runner": platform.platform(),
+        "path_fixture": "中文 & Hub 工具集",
+        "toolset": metadata,
+        "tools": results,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--architecture", required=True, choices=tuple(portable_tools.ARCHITECTURES))
+    parser.add_argument("--toolset", action="store_true")
+    parser.add_argument("--platform", choices=("windows", "linux"))
+    parser.add_argument("--architecture", required=True, choices=("x64", "amd64", "arm64"))
     parser.add_argument("--artifacts", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
-        report = verify(args.architecture, args.artifacts.resolve(strict=True))
+        if args.toolset:
+            platform_name = args.platform or ("windows" if os.name == "nt" else "linux")
+            report = verify_toolset(platform_name, args.architecture, args.artifacts.resolve(strict=True))
+        else:
+            report = verify(args.architecture, args.artifacts.resolve(strict=True))
         args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except (OSError, KeyError, ValueError, portable_tools.PortableToolError) as exc:
         print(json.dumps({"status": "FAILED", "error": str(exc)}, ensure_ascii=False), file=sys.stderr)

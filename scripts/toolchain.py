@@ -36,7 +36,7 @@ class ToolchainError(RuntimeError):
         self.code = code
 
 
-def _validate_artifact_path(tool_id: str, executable: str, raw_path: str, platform_name: str) -> None:
+def _safe_relative_path(raw_path: str) -> PurePosixPath | None:
     path = PurePosixPath(raw_path)
     segments = raw_path.split("/")
     if (
@@ -46,6 +46,13 @@ def _validate_artifact_path(tool_id: str, executable: str, raw_path: str, platfo
         or path.is_absolute()
         or any(part in {"", ".", ".."} for part in segments)
     ):
+        return None
+    return path
+
+
+def _validate_artifact_path(tool_id: str, executable: str, raw_path: str, platform_name: str) -> None:
+    path = _safe_relative_path(raw_path)
+    if path is None:
         raise ToolchainError("MANIFEST_ARTIFACT_PATH_UNSAFE", f"unsafe executable path for {tool_id}: {raw_path}")
     expected = f"{executable}.exe" if platform_name == "windows" else executable
     matches = path.name.casefold() == expected.casefold() if platform_name == "windows" else path.name == expected
@@ -184,6 +191,40 @@ def validate_manifest(manifest: dict[str, Any], schema: dict[str, Any] | None = 
             raise ToolchainError(
                 "MANIFEST_HUB_ARTIFACT_MISSING", f"missing Hub artifact targets for {tool_id}: {missing}"
             )
+
+    toolset_targets: set[tuple[str, str]] = set()
+    for toolset in manifest["toolsets"]:
+        target = (str(toolset["platform"]), str(toolset["architecture"]))
+        if target in toolset_targets:
+            raise ToolchainError("MANIFEST_TOOLSET_DUPLICATE", f"duplicate Hub toolset target: {target}")
+        if target not in SUPPORTED_PLATFORMS:
+            raise ToolchainError("MANIFEST_TOOLSET_TARGET_UNSUPPORTED", f"unsupported Hub toolset target: {target}")
+        toolset_targets.add(target)
+        if tuple(toolset["tool_ids"]) != HUB_TOOL_IDS:
+            raise ToolchainError("MANIFEST_TOOLSET_SCOPE_INVALID", "Hub toolset must contain exactly the Hub tools")
+        expected_format = "zip" if target[0] == "windows" else "tar.gz"
+        if toolset["archive_format"] != expected_format:
+            raise ToolchainError(
+                "MANIFEST_TOOLSET_FORMAT_INVALID", f"Hub toolset for {target} must use {expected_format}"
+            )
+        paths = [toolset["manifest_path"], *toolset["fixture_paths"], *toolset["license_paths"]]
+        if any(_safe_relative_path(str(path)) is None for path in paths):
+            raise ToolchainError("MANIFEST_TOOLSET_PATH_UNSAFE", f"Hub toolset contains an unsafe path: {target}")
+        if "fixtures/fonts/DejaVuSans.ttf" not in toolset["fixture_paths"]:
+            raise ToolchainError("MANIFEST_TOOLSET_FIXTURE_MISSING", f"Hub toolset test font is missing: {target}")
+        for tool_id in HUB_TOOL_IDS:
+            prefix = f"licenses/{tool_id}/"
+            if not any(str(path).startswith(prefix) for path in toolset["license_paths"]):
+                raise ToolchainError(
+                    "MANIFEST_TOOLSET_LICENSE_MISSING", f"Hub toolset license is missing for {tool_id}: {target}"
+                )
+
+    contract_version = int(manifest["generated_contract_version"])
+    if contract_version == 1 and toolset_targets:
+        raise ToolchainError("MANIFEST_TOOLSET_CONTRACT_MISMATCH", "v1 projection cannot contain Hub toolsets")
+    if contract_version == 2 and toolset_targets != SUPPORTED_PLATFORMS:
+        missing = sorted(SUPPORTED_PLATFORMS - toolset_targets)
+        raise ToolchainError("MANIFEST_TOOLSET_MISSING", f"missing Hub toolset targets: {missing}")
     return manifest
 
 
@@ -770,6 +811,8 @@ def export_projection(entrypoint: str, output: Path | None = None) -> dict[str, 
         "entrypoint": entrypoint,
         "tools": [_projection_tool(tool) for tool in visible_tools(manifest, entrypoint)],
     }
+    if entrypoint == "hub" and manifest["generated_contract_version"] >= 2:
+        projection["toolsets"] = copy.deepcopy(manifest["toolsets"])
     if output is not None:
         write_json_atomic(output.resolve(strict=False), projection)
     return projection

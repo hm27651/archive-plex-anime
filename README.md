@@ -13,6 +13,8 @@ python scripts/workflow.py tools use-path mediainfo "D:\Tools\MediaInfo.exe" --j
 python scripts/workflow.py tools export --entrypoint hub --output "D:\Temp\archive-tools-hub.json" --json
 ```
 
+Hub 四项工具另有经原生 amd64/arm64 能力检查的 Linux 便携制品。固定版本、摘要、构建来源、许可证和验收报告见 [Linux 便携工具说明](docs/linux-portable-tools.md)；工具准备与 BDRip 媒体任务相互独立。
+
 Hub 投影自动排除 KDocs 和内部字体转换工具；CLI 与独立 Skill 仍可按需使用 KDocs。
 
 新会话请先阅读：

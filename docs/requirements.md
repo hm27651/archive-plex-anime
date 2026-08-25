@@ -300,6 +300,12 @@ Movie 可在保留规范内封 ASS 和字体附件的同时增加外挂 ASS，�
 - 工具缺失时 `list` 仍返回项目主页和官方下载页；`check` 只运行明确选中的工具，状态限定为 `ready`、`missing`、`not_configured`、`unsupported_platform`、`capability_failed`、`needs_recheck`。
 - 第一阶段不提供 `tools install/update/rollback`，不下载制品，不从网页抓取“最新版”，也不接受任意下载 URL。固定制品字段只为后续受管安装预留。
 - 媒体工作流仍按本次选择的能力检查工具，未选择的工具不得因为清单存在而被检查；工具管理模块不读取媒体目录或修改 TV/Movie 规则。
+- 共享工具目录同时维护 Hub 四项工具的 Windows x64、Linux amd64 与 Linux arm64 固定制品；Linux 包只代表工具已准备，不创建或启动 BDRip 任务。
+- Linux 便携包必须在与 Hub 基础运行层一致的 Debian Bookworm 环境构建，不执行运行时 `apt install`、不要求 root、不写系统目录，并只通过包内相对启动器加载随包运行库。
+- Linux 制品来源固定在 `toolchain/linux-sources.json`。发布必须分别在原生 amd64 与原生 arm64 runner 上执行版本身份和全部真实能力检查；QEMU、仅解压或仅检查文件存在不能替代原生验收。
+- 发布流程只有在两种架构全部通过后才能生成 GitHub Release。制品、大小、SHA-256、能力报告和第三方来源必须可审计，失败不得改写现有清单或影响 Windows 配置及 archive 媒体流程。
+- 每项制品的可执行路径必须与工具命令数量和顺序一致，且为无绝对路径、反斜杠、空段或 `..` 的安全相对路径；Linux 路径不得添加 `.exe`。
+- Hub Linux 包与投影继续严格排除 KDocs 和 otf2ttf；CLI 与独立 Skill 继续保留其现有 KDocs 和外部 otf2ttf 能力。
 
 ## 18. 轻量化与代码结构要求
 

@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "manifest_version": "1.1.0",
+  "source_version": "eb5c1fbc277fe3de3d88ee9df7c92551e17eacc0a1e03de33e1fae9de5e3d89e",
+  "source_commit": "00eb36dcb124048013e5774111081072e59bb7a6",
+  "entrypoint": "hub",
+  "tools": [
+    {
+      "id": "mediainfo",
+      "name": "MediaInfo CLI",
+      "purpose": "读取视频、音频和字幕轨道资料",
+      "project_url": "https://github.com/MediaArea/MediaInfo",
+      "download_url": "https://mediaarea.net/en/MediaInfo/Download",
+      "binary_source_url": null,
+      "license": "BSD-2-Clause",
+      "path_kind": "file",
+      "path_setting": "mediainfo_path",
+      "executables": [
+        "mediainfo"
+      ],
+      "capabilities": [
+        {
+          "id": "version",
+          "label": "版本读取"
+        },
+        {
+          "id": "media_json",
+          "label": "读取媒体资料"
+        }
+      ],
+      "artifacts": [
+        {
+          "version": "26.05",
+          "platform": "windows",
+          "architecture": "x64",
+          "artifact_url": "https://mediaarea.net/download/binary/mediainfo/26.05/MediaInfo_CLI_26.05_Windows_x64.zip",
+          "filename": "MediaInfo_CLI_26.05_Windows_x64.zip",
+          "sha256": "f7f80620ce6d14f4995f0de6f98e3ef18ad29496db01899571152ee3311229f9",
+          "size": 4136659,
+          "archive_format": "zip",
+          "executable_paths": [
+            "MediaInfo.exe"
+          ]
+        },
+        {
+          "version": "23.04",
+          "platform": "linux",
+          "architecture": "amd64",
+          "artifact_url": "https://github.com/hm27651/archive-plex-anime/releases/download/portable-tools-v1.0.2/mediainfo-linux-amd64.tar.gz",
+          "filename": "mediainfo-linux-amd64.tar.gz",
+          "sha256": "df81859e3952ed5db0d6eca5d54702b26131b95e1783004831d0ce2d326d1478",
+          "size": 10987161,
+          "archive_format": "tar.gz",
+          "executable_paths": [
+            "bin/mediainfo"
+          ]
+        },
+        {
+          "version": "23.04",
+          "platform": "linux",
+          "architecture": "arm64",
+          "artifact_url": "https://github.com/hm27651/archive-plex-anime/releases/download/portable-tools-v1.0.2/mediainfo-linux-arm64.tar.gz",
+          "filename": "mediainfo-linux-arm64.tar.gz",
+          "sha256": "37930109529df58cf27f9cf57925d9563bae1ca6d8e78cc68444444bd9e0fc1d",
+          "size": 10449056,
+          "archive_format": "tar.gz",
+          "executable_paths": [
+            "bin/mediainfo"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "mkvtoolnix",
+      "name": "MKVToolNix",
+      "purpose": "检查、提取和重新封装 MKV",
+      "project_url": "https://codeberg.org/mbunkus/mkvtoolnix",
+      "download_url": "https://mkvtoolnix.download/downloads.html",
+      "binary_source_url": null,
+      "license": "GPL-2.0-or-later",
+      "path_kind": "directory",
+      "path_setting": "mkvtoolnix_dir",
+      "executables": [
+        "mkvmerge",
+        "mkvinfo",
+        "mkvextract"
+      ],
+      "capabilities": [
+        {
+          "id": "version",
+          "label": "版本读取"
+        },
+        {
+          "id": "identify",
+          "label": "识别 MKV"
+        },
+        {
+          "id": "inspect",
+          "label": "检查封装"
+        },
+        {
+          "id": "extract",
+          "label": "提取附件"
+        }
+      ],
+      "artifacts": [
+        {
+          "version": "100.0",
+          "platform": "windows",
+          "architecture": "x64",
+          "artifact_url": "https://mkvtoolnix.download/windows/releases/100.0/mkvtoolnix-64-bit-100.0.7z",
+          "filename": "mkvtoolnix-64-bit-100.0.7z",
+          "sha256": "061de38bd10e7e28697b897e0b890b78d6f2ec8d668a9c198600ed45c19672ab",
+          "size": 29708584,
+          "archive_format": "7z",
+          "executable_paths": [
+            "mkvmerge.exe",
+            "mkvinfo.exe",
+            "mkvextract.exe"
+          ]
+        },
+        {
+          "version": "74.0.0",
+          "platform": "linux",
+          "architecture": "amd64",
+          "artifact_url": "https://github.com/hm27651/archive-plex-anime/releases/download/portable-tools-v1.0.2/mkvtoolnix-linux-amd64.tar.gz",
+          "filename": "mkvtoolnix-linux-amd64.tar.gz",
+          "sha256": "c59ecc04aaa2f40b6abf7228e730eea50ea4e9fbc65821df54d3d74b09a1e9f8",
+          "size": 24204032,
+          "archive_format": "tar.gz",
+          "executable_paths": [
+            "bin/mkvmerge",
+            "bin/mkvinfo",
+            "bin/mkvextract"
+          ]
+        },
+        {
+          "version": "74.0.0",
+          "platform": "linux",
+          "architecture": "arm64",
+          "artifact_url": "https://github.com/hm27651/archive-plex-anime/releases/download/portable-tools-v1.0.2/mkvtoolnix-linux-arm64.tar.gz",
+          "filename": "mkvtoolnix-linux-arm64.tar.gz",
+          "sha256": "42495c9f565a4a045a5f477adb86ef00018f069667044656f69aeeb5562d704f",
+          "size": 23733737,
+          "archive_format": "tar.gz",
+          "executable_paths": [
+            "bin/mkvmerge",
+            "bin/mkvinfo",
+            "bin/mkvextract"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ffmpeg",
+      "name": "FFmpeg / FFprobe",
+      "purpose": "读取原盘音轨并验证固定音频偏移",
+      "project_url": "https://ffmpeg.org/",
+      "download_url": "https://ffmpeg.org/download.html",
+      "binary_source_url": "https://github.com/BtbN/FFmpeg-Builds/releases",
+      "license": "LGPL-2.1-or-later",
+      "path_kind": "directory",
+      "path_setting": "ffmpeg_dir",
+      "executables": [
+        "ffmpeg",
+        "ffprobe"
+      ],
+      "capabilities": [
+        {
+          "id": "version",
+          "label": "版本读取"
+        },
+        {
+          "id": "pcm_decode",
+          "label": "PCM 解码"
+        },
+        {
+          "id": "probe",
+          "label": "读取音轨"
+        }
+      ],
+      "artifacts": [
+        {
+          "version": "8.1.2-44-g7c533d0f86",
+          "platform": "windows",
+          "architecture": "x64",
+          "artifact_url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-24-13-10/ffmpeg-n8.1.2-44-g7c533d0f86-win64-lgpl-8.1.zip",
+          "filename": "ffmpeg-n8.1.2-44-g7c533d0f86-win64-lgpl-8.1.zip",
+          "sha256": "5ca909ac2a46635ba4f21e5c04861825132fcf8b8c263b20793d79933e2da5d1",
+          "size": 146078533,
+          "archive_format": "zip",
+          "executable_paths": [
+            "bin/ffmpeg.exe",
+            "bin/ffprobe.exe"
+          ]
+        },
+        {
+          "version": "5.1.9-0+deb12u1",
+          "platform": "linux",
+          "architecture": "amd64",
+          "artifact_url": "https://github.com/hm27651/archive-plex-anime/releases/download/portable-tools-v1.0.2/ffmpeg-linux-amd64.tar.gz",
+          "filename": "ffmpeg-linux-amd64.tar.gz",
+          "sha256": "aae7a36cac05640ea535a683818449eae97d4eebd0b4047752b29762f70a74db",
+          "size": 101239166,
+          "archive_format": "tar.gz",
+          "executable_paths": [
+            "bin/ffmpeg",
+            "bin/ffprobe"
+          ]
+        },
+        {
+          "version": "5.1.9-0+deb12u1",
+          "platform": "linux",
+          "architecture": "arm64",
+          "artifact_url": "https://github.com/hm27651/archive-plex-anime/releases/download/portable-tools-v1.0.2/ffmpeg-linux-arm64.tar.gz",
+          "filename": "ffmpeg-linux-arm64.tar.gz",
+          "sha256": "fa82d430c37346557067e99b074e48d0a340602abf1abd14c895c08a557302ec",
+          "size": 93995511,
+          "archive_format": "tar.gz",
+          "executable_paths": [
+            "bin/ffmpeg",
+            "bin/ffprobe"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "assfonts",
+      "name": "assfonts",
+      "purpose": "为 ASS 字幕生成字体子集",
+      "project_url": "https://github.com/wyzdwdz/assfonts",
+      "download_url": "https://github.com/wyzdwdz/assfonts/releases",
+      "binary_source_url": null,
+      "license": "GPL-3.0",
+      "path_kind": "file",
+      "path_setting": "assfonts_path",
+      "executables": [
+        "assfonts"
+      ],
+      "capabilities": [
+        {
+          "id": "version",
+          "label": "版本读取"
+        },
+        {
+          "id": "subtitle_subset",
+          "label": "字幕字体子集化"
+        }
+      ],
+      "artifacts": [
+        {
+          "version": "0.7.3",
+          "platform": "windows",
+          "architecture": "x64",
+          "artifact_url": "https://github.com/wyzdwdz/assfonts/releases/download/v0.7.3/assfonts-v0.7.3-x86_64-Windows.zip",
+          "filename": "assfonts-v0.7.3-x86_64-Windows.zip",
+          "sha256": "4dd11a3aa86cf03b8428ffd644b54c25d9a0ab7ab212c1460e6a34eaf22d7fa4",
+          "size": 14448047,
+          "archive_format": "zip",
+          "executable_paths": [
+            "assfonts.exe"
+          ]
+        },
+        {
+          "version": "0.7.3",
+          "platform": "linux",
+          "architecture": "amd64",
+          "artifact_url": "https://github.com/hm27651/archive-plex-anime/releases/download/portable-tools-v1.0.2/assfonts-linux-amd64.tar.gz",
+          "filename": "assfonts-linux-amd64.tar.gz",
+          "sha256": "79f9c21bbfae853902b232419aefdf8b0a1d3f5d6737e15bb1eb7a7f14b131c4",
+          "size": 4239061,
+          "archive_format": "tar.gz",
+          "executable_paths": [
+            "bin/assfonts"
+          ]
+        },
+        {
+          "version": "0.7.3",
+          "platform": "linux",
+          "architecture": "arm64",
+          "artifact_url": "https://github.com/hm27651/archive-plex-anime/releases/download/portable-tools-v1.0.2/assfonts-linux-arm64.tar.gz",
+          "filename": "assfonts-linux-arm64.tar.gz",
+          "sha256": "feee6bd5dfeb38e6c82e12eb78b2ea97401dc9645cfb581825eebc5b0ae42dae",
+          "size": 4014663,
+          "archive_format": "tar.gz",
+          "executable_paths": [
+            "bin/assfonts"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -8,6 +8,7 @@
 - amd64 报告：[capability-report-linux-amd64.json](https://github.com/hm27651/archive-plex-anime/releases/download/portable-tools-v1.0.2/capability-report-linux-amd64.json)
 - arm64 报告：[capability-report-linux-arm64.json](https://github.com/hm27651/archive-plex-anime/releases/download/portable-tools-v1.0.2/capability-report-linux-arm64.json)
 - 制品索引：[portable-tools-index.json](https://github.com/hm27651/archive-plex-anime/releases/download/portable-tools-v1.0.2/portable-tools-index.json)
+- 仓库内 Hub 投影示例：`toolchain/archive-tools-hub.json`（固定到引入清单的 archive 完整提交）
 
 | 工具 | Linux 版本 | 实际验收能力 |
 |---|---:|---|

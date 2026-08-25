@@ -331,18 +331,31 @@ def _version_command(tool: dict[str, Any], paths: dict[str, Path]) -> list[str]:
         return [str(paths["mkvmerge"]), "--version"]
     if tool_id == "ffmpeg":
         return [str(paths["ffmpeg"]), "-version"]
+    if tool_id == "kdocs-cli":
+        return [str(paths["kdocs-cli"]), "--version"]
     return [str(paths[tool["executables"][0]]), "--help"]
 
 
-def _version_from_output(tool_id: str, output: str) -> str:
+def _probe_version(tool_id: str, output: str) -> tuple[bool, str]:
+    if tool_id == "otf2ttf":
+        recognized = re.search(r"(?im)^\s*usage:\s*otf2ttf(?:\.py)?(?:\s|$)", output) is not None
+        return recognized, ""
     patterns = {
         "mediainfo": r"(?im)MediaInfo(?:Lib)?[^\r\n]*?v?(\d+(?:\.\d+)+)",
-        "mkvtoolnix": r"(?im)mkvmerge\s+v([^\s]+)",
-        "ffmpeg": r"(?im)ffmpeg\s+version\s+([^\s]+)",
-        "assfonts": r"(?im)assfonts\s+v([^\s]+)",
+        "mkvtoolnix": r"(?im)^\s*mkvmerge\s+v([0-9]+(?:\.[0-9]+)*(?:[-+._][A-Za-z0-9.-]+)?)\b",
+        "ffmpeg": r"(?im)^\s*ffmpeg\s+version\s+([A-Za-z0-9][^\s]*)\b",
+        "assfonts": r"(?im)^\s*assfonts\s+v?(\d+(?:\.\d+)+(?:[-+._][A-Za-z0-9.-]+)?)\s*$",
+        "kdocs-cli": r"^\s*(\d+(?:\.\d+){1,3})\s*$",
     }
-    matched = re.search(patterns.get(tool_id, r"(?m)^\s*([^\r\n]+)"), output)
-    return matched.group(1)[:80] if matched else ""
+    pattern = patterns.get(tool_id)
+    if pattern is None:
+        return False, ""
+    matched = re.search(pattern, output)
+    return (True, matched.group(1)[:80]) if matched else (False, "")
+
+
+def _version_from_output(tool_id: str, output: str) -> str:
+    return _probe_version(tool_id, output)[1]
 
 
 def _capability_results(
@@ -362,8 +375,12 @@ def _capability_results(
     version = runner(_version_command(tool, paths))
     version_id = "version" if "version" in labels else None
     version_output = (str(version.get("stdout") or "") + "\n" + str(version.get("stderr") or "")).strip()
+    version_recognized, installed_version = _probe_version(tool["tool_id"], version_output)
     if version_id:
-        record(version_id, bool(version.get("ok")), "version command failed")
+        if not version.get("ok"):
+            record(version_id, False, "version command failed")
+        else:
+            record(version_id, version_recognized, "version output is not recognizable")
 
     with tempfile.TemporaryDirectory(prefix="archive-tool-check-") as temporary:
         root = Path(temporary)
@@ -470,7 +487,7 @@ def _capability_results(
     for capability_id in missing_contracts:
         record(capability_id, False, "capability contract is not implemented")
     ordered = [results[item["capability_id"]] for item in tool["capability_checks"]]
-    return ordered, _version_from_output(tool["tool_id"], version_output)
+    return ordered, installed_version
 
 
 def check_capability(

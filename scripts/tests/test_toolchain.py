@@ -127,6 +127,77 @@ class ToolManifestTests(unittest.TestCase):
         self.assertIsNone(toolchain.select_artifact(ffmpeg, "linux", "amd64"))
 
 
+class ToolVersionTests(unittest.TestCase):
+    def tool(self, tool_id: str) -> dict:
+        return next(item for item in toolchain.load_manifest()["tools"] if item["tool_id"] == tool_id)
+
+    def test_supported_tool_versions_are_recognized(self):
+        examples = {
+            "mediainfo": ("MediaInfo Command line\nMediaInfoLib - v26.05", "26.05"),
+            "mkvtoolnix": ("mkvmerge v100.0 ('You Oughta Know')", "100.0"),
+            "ffmpeg": ("ffmpeg version n8.1.2-44-g7c533d0f86 Copyright", "n8.1.2-44-g7c533d0f86"),
+            "assfonts": ("assfonts v0.7.3", "0.7.3"),
+            "kdocs-cli": ("2.5.13", "2.5.13"),
+        }
+        for tool_id, (output, expected) in examples.items():
+            with self.subTest(tool_id=tool_id):
+                self.assertEqual(toolchain._probe_version(tool_id, output), (True, expected))
+                self.assertEqual(toolchain._version_from_output(tool_id, output), expected)
+
+    def test_successful_command_with_unrecognized_output_is_not_a_version(self):
+        for tool_id in ("mediainfo", "mkvtoolnix", "ffmpeg", "assfonts", "kdocs-cli", "otf2ttf"):
+            with self.subTest(tool_id=tool_id):
+                self.assertEqual(toolchain._probe_version(tool_id, "ordinary successful program"), (False, ""))
+
+    def test_kdocs_uses_version_command_and_requires_numeric_output(self):
+        tool = self.tool("kdocs-cli")
+        executable = Path("C:/Tools/kdocs-cli.exe")
+
+        self.assertEqual(toolchain._version_command(tool, {"kdocs-cli": executable}), [str(executable), "--version"])
+        self.assertEqual(toolchain._probe_version("kdocs-cli", "KDocs CLI help\n2.5.13\nusage"), (False, ""))
+
+    def test_otf2ttf_usage_proves_identity_without_fabricating_version(self):
+        tool = self.tool("otf2ttf")
+        executable = Path("C:/Tools/otf2ttf.exe")
+
+        self.assertEqual(toolchain._version_command(tool, {"otf2ttf": executable}), [str(executable), "--help"])
+        self.assertEqual(toolchain._probe_version("otf2ttf", "usage: otf2ttf [-h] input_file"), (True, ""))
+
+    def test_unrecognized_version_output_prevents_ready_status(self):
+        tool = self.tool("kdocs-cli")
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / toolchain._executable_name("kdocs-cli")
+            candidate.write_bytes(b"fake")
+            candidate.chmod(candidate.stat().st_mode | stat.S_IXUSR)
+            result = toolchain.check_tool(
+                tool,
+                config={},
+                candidate=candidate,
+                runner=lambda _arguments: {"ok": True, "stdout": "ordinary successful program", "stderr": ""},
+            )
+
+        self.assertEqual(result["status"], "capability_failed")
+        self.assertEqual(result["installed_version"], "")
+        self.assertEqual(result["capabilities"][0]["reason"], "version output is not recognizable")
+
+    def test_otf2ttf_can_be_ready_with_empty_installed_version(self):
+        tool = self.tool("otf2ttf")
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / toolchain._executable_name("otf2ttf")
+            candidate.write_bytes(b"fake")
+            candidate.chmod(candidate.stat().st_mode | stat.S_IXUSR)
+            result = toolchain.check_tool(
+                tool,
+                config={},
+                candidate=candidate,
+                runner=lambda _arguments: {"ok": True, "stdout": "usage: otf2ttf [-h] input_file", "stderr": ""},
+            )
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["installed_version"], "")
+        self.assertEqual(result["capabilities"][0]["status"], "ready")
+
+
 class ToolPathTests(unittest.TestCase):
     def write_config(self, root: Path) -> Path:
         selected = root / "config.json"
@@ -214,6 +285,22 @@ class ToolPathTests(unittest.TestCase):
             with mock.patch.object(toolchain, "check_tool", return_value=failure):
                 with self.assertRaises(toolchain.ToolchainError) as raised:
                     toolchain.update_tool_path("mediainfo", candidate, config)
+            self.assertEqual(raised.exception.code, "TOOL_CHECK_FAILED")
+            self.assertEqual(config.read_bytes(), before)
+
+    def test_use_path_preserves_config_when_version_identity_is_invalid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = self.write_config(root)
+            candidate = root / toolchain._executable_name("kdocs-cli")
+            candidate.write_bytes(b"fake")
+            candidate.chmod(candidate.stat().st_mode | stat.S_IXUSR)
+            before = config.read_bytes()
+            completed = {"ok": True, "stdout": "ordinary successful program", "stderr": ""}
+            with mock.patch.object(toolchain, "_run_command", return_value=completed):
+                with self.assertRaises(toolchain.ToolchainError) as raised:
+                    toolchain.update_tool_path("kdocs-cli", candidate, config)
+
             self.assertEqual(raised.exception.code, "TOOL_CHECK_FAILED")
             self.assertEqual(config.read_bytes(), before)
 

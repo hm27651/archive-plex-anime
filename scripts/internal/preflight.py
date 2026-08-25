@@ -403,46 +403,86 @@ def execute_inspection(
         "python": {"status": "READY", "path": sys.executable},
     }
 
-    raw_metadata = getattr(args, "metadata_json", None)
-    if raw_metadata:
-        try:
-            metadata_decision = json.loads(raw_metadata)
-        except json.JSONDecodeError as exc:
-            raise WorkflowError("METADATA_OPTIONS_INVALID", f"Invalid metadata decision JSON: {exc}", "DECISION_REQUIRED") from exc
-        if not isinstance(metadata_decision, dict):
-            raise WorkflowError("METADATA_OPTIONS_INVALID", "Metadata decisions must be an object", "DECISION_REQUIRED")
-    else:
-        metadata_decision = {}
-    if args.title and not metadata_decision.get("query"):
-        metadata_decision = {**metadata_decision, "query": str(args.title)}
-    metadata_config = config.get("metadata", {}) if isinstance(config.get("metadata"), dict) else {}
-    metadata_enabled = bool(metadata_decision.get("enabled", metadata_config.get("enabled", False))) and str(
-        metadata_decision.get("mode", metadata_config.get("mode", "auto"))
-    ).casefold() != "off"
-    metadata_files = [
-        *[path for path in videos if path.suffix.casefold() in {".mkv", ".mp4"}],
-        *external_subtitles,
-    ]
-    metadata_key = _component_key({
-        "enabled": metadata_enabled,
-        "route": route.get("branch"),
-        "decision": metadata_decision,
-        "config": metadata_config,
-        "credentials": credential_presence(),
-        "files": [str(path.relative_to(work)).replace("\\", "/") for path in metadata_files],
-    })
+    selected_capabilities = {str(value) for value in (getattr(args, "selected_capability", None) or [])}
+    metadata_selected = (
+        "metadata" in selected_capabilities
+        if selected_capabilities
+        else args.task_mode != "local-only"
+    )
     old_metadata = previous_discovery.get("metadata")
-    if (
-        _component_matches(previous, "metadata", metadata_key)
-        and isinstance(old_metadata, dict)
-        and old_metadata.get("status") in {"MATCHED", "OFF"}
-    ):
-        metadata = copy.deepcopy(old_metadata)
-        reused_components.add("metadata")
+    if metadata_selected:
+        raw_metadata = getattr(args, "metadata_json", None)
+        if raw_metadata:
+            try:
+                metadata_decision = json.loads(raw_metadata)
+            except json.JSONDecodeError as exc:
+                raise WorkflowError("METADATA_OPTIONS_INVALID", f"Invalid metadata decision JSON: {exc}", "DECISION_REQUIRED") from exc
+            if not isinstance(metadata_decision, dict):
+                raise WorkflowError("METADATA_OPTIONS_INVALID", "Metadata decisions must be an object", "DECISION_REQUIRED")
+        else:
+            metadata_decision = {}
+        if args.title and not metadata_decision.get("query"):
+            metadata_decision = {**metadata_decision, "query": str(args.title)}
+        metadata_config = config.get("metadata", {}) if isinstance(config.get("metadata"), dict) else {}
+        metadata_enabled = bool(metadata_decision.get("enabled", metadata_config.get("enabled", False))) and str(
+            metadata_decision.get("mode", metadata_config.get("mode", "auto"))
+        ).casefold() != "off"
+        metadata_files = [
+            *[path for path in videos if path.suffix.casefold() in {".mkv", ".mp4"}],
+            *external_subtitles,
+        ]
+        metadata_key = _component_key({
+            "selected": True,
+            "enabled": metadata_enabled,
+            "route": route.get("branch"),
+            "decision": metadata_decision,
+            "config": metadata_config,
+            "credentials": credential_presence(),
+            "files": [str(path.relative_to(work)).replace("\\", "/") for path in metadata_files],
+        })
+        if (
+            _component_matches(previous, "metadata", metadata_key)
+            and isinstance(old_metadata, dict)
+            and old_metadata.get("selected") is True
+            and old_metadata.get("status") in {"MATCHED", "OFF"}
+        ):
+            metadata = copy.deepcopy(old_metadata)
+            reused_components.add("metadata")
+        else:
+            inspected_metadata = metadata_inspector(work, config, route, metadata_files, metadata_decision)
+            metadata = {**inspected_metadata, "selected": True}
+            checked_components.add("metadata")
     else:
-        metadata = metadata_inspector(work, config, route, metadata_files, metadata_decision)
-        checked_components.add("metadata")
+        metadata_key = _component_key({"selected": False, "route": route.get("branch")})
+        if (
+            _component_matches(previous, "metadata", metadata_key)
+            and isinstance(old_metadata, dict)
+            and old_metadata.get("selected") is False
+            and old_metadata.get("status") == "OFF"
+        ):
+            metadata = copy.deepcopy(old_metadata)
+            reused_components.add("metadata")
+        else:
+            metadata = {
+                "status": "OFF",
+                "mode": "off",
+                "selected": False,
+                "reason": "CAPABILITY_NOT_SELECTED",
+                "suggestedDecisions": {},
+                "issues": [],
+                "warnings": [],
+                "candidates": [],
+                "episodes": [],
+            }
+            checked_components.add("metadata")
     components["metadata"] = {"key": metadata_key}
+    selected_final_sinks = set(getattr(args, "selected_final_sink", None) or [])
+    if selected_final_sinks and not metadata_selected and not str(args.title or "").strip():
+        raise WorkflowError(
+            "TITLE_REQUIRED_WITHOUT_METADATA",
+            "Custom final delivery without metadata requires a confirmed title",
+            "DECISION_REQUIRED",
+        )
 
     workspace_embedded = {"status": "EXTERNAL", "assTracks": 0, "files": [], "extractedSubtitles": []}
     retain_embedded = bool(getattr(args, "retain_embedded_subtitles", False))

@@ -1,0 +1,8 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# Start with correctness rules that are stable across the existing script
+# layout.  Broader style/import cleanup is a separate refactor.
+select = ["E9", "F63", "F7", "F82"]

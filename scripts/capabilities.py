@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 
-PRESET_VERSION = 1
+PRESET_VERSION = 2
 ENTRYPOINTS = ("cli", "skill", "hub")
 PRESETS = ("complete-archive", "replacement", "archive-only", "local-only")
 
@@ -56,7 +56,11 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
         "requires": ("inspect",),
         "sink": "tracker",
     },
-    "cleanup": {"label": "安全清理", "branches": ("tv", "movie"), "requires": ("inspect",)},
+    "cleanup": {
+        "label": "安全清理",
+        "branches": ("tv", "movie"),
+        "requires": ("inspect", "video-delivery"),
+    },
 }
 
 ENTRYPOINT_HIDDEN = {
@@ -96,8 +100,6 @@ ARCHIVE_ONLY_CAPABILITIES = frozenset(
     }
 )
 ARCHIVE_ONLY_EXPLICIT_UNSUPPORTED = frozenset({"movie-audio", "subtitle", "remux", "subtitle-package"})
-FINAL_CAPABILITIES = frozenset({"video-delivery", "subtitle-delivery", "kdocs-tracker"})
-
 CAPABILITY_TO_STEP = {
     "inspect": "inspect",
     "movie-audio": "movie-audio",
@@ -267,8 +269,8 @@ def resolve_capabilities(
     selected = _dependency_closure(selected, set(available) if available is not None else None, preset=preset)
     auto_added = selected - requested_set if selection_mode == "custom" else set()
 
-    if "cleanup" in selected and not (selected & FINAL_CAPABILITIES):
-        issues.append({"code": "CLEANUP_DELIVERY_REQUIRED", "capability": "cleanup"})
+    if "cleanup" in selected and "video-delivery" not in selected:
+        issues.append({"code": "CLEANUP_VIDEO_DELIVERY_REQUIRED", "capability": "cleanup"})
 
     unavailable: set[str] = set()
     if available is not None:
@@ -281,6 +283,14 @@ def resolve_capabilities(
                 issues.append({"code": "CAPABILITY_UNAVAILABLE", "capability": name})
         selected &= available_set
         auto_added &= available_set
+
+    # Availability filtering must not leave cleanup behind after its required
+    # video delivery was removed.  The execution step repeats this invariant
+    # so damaged or directly edited states cannot bypass it.
+    if "cleanup" in selected and "video-delivery" not in selected:
+        issues.append({"code": "CLEANUP_VIDEO_DELIVERY_REQUIRED", "capability": "cleanup"})
+        selected.discard("cleanup")
+        auto_added.discard("cleanup")
 
     resolved = _ordered(selected)
     sinks = [
@@ -309,7 +319,10 @@ def resolve_capabilities(
 def available_capabilities(plan: dict[str, Any], manifest: dict[str, Any]) -> set[str]:
     """Derive media-specific capabilities from an already generated plan."""
 
-    available = {"inspect", "metadata"}
+    available = {"inspect"}
+    metadata = manifest.get("discovery", {}).get("metadata", {})
+    if metadata.get("selected") is True and metadata.get("status") == "MATCHED":
+        available.add("metadata")
     if plan.get("movieAudioPlans"):
         available.add("movie-audio")
     if plan.get("subtitleGroups") or plan.get("renameJobs"):
@@ -326,7 +339,7 @@ def available_capabilities(plan: dict[str, Any], manifest: dict[str, Any]) -> se
     tracker_state = manifest.get("discovery", {}).get("libraryTarget", {}).get("trackerState", {})
     if tracker_state.get("status") == "OK":
         available.add("kdocs-tracker")
-    if available & {"video-delivery", "subtitle-delivery", "kdocs-tracker"}:
+    if "video-delivery" in available:
         available.add("cleanup")
     return available
 

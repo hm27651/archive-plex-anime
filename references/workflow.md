@@ -17,7 +17,7 @@ init → inspect → approve-preflight
 - `archive-only`：由 TV/Movie 各自生成直接入库计划，不选择 remux；
 - `local-only`：只选择用户要求的 `movie-audio`、`subtitle`、`remux`、`package` 及必要依赖，`inspect` 自动执行；不写 NAS、维护表或删除目录。`review` 会同时准备最终目标，因此不属于 local-only；显式请求时返回 `LOCAL_STEP_UNSUPPORTED`。
 
-预置之外可以选择 `inspect`、`metadata`、`movie-audio`、`subtitle`、`remux`、`subtitle-package`、`video-delivery`、`subtitle-delivery`、`kdocs-tracker`、`cleanup`。用户不直接选择内部步骤；解析器自动补依赖并按实际媒体计划删除不可用的预置能力。自定义请求的能力不可用时明确返回问题，不静默改成其他工作流。CLI/Skill 可见 KDocs，Hub 不展示、不检查、不配置、不执行 KDocs。
+预置之外可以选择 `inspect`、`metadata`、`movie-audio`、`subtitle`、`remux`、`subtitle-package`、`video-delivery`、`subtitle-delivery`、`kdocs-tracker`、`cleanup`。用户不直接选择内部步骤；解析器自动补依赖并按实际媒体计划删除不可用的预置能力。`cleanup` 必须补齐 `video-delivery`，不能由字幕 ZIP 或 KDocs 单独解锁。自定义请求的能力不可用时明确返回问题，不静默改成其他工作流。CLI/Skill 可见 KDocs，Hub 不展示、不检查、不配置、不执行 KDocs。
 
 完整任务必须有可执行计划；空计划不得进入 review。
 
@@ -36,6 +36,8 @@ init → inspect → approve-preflight
 
 前检允许写入 `.archive-state.json` 和 `.archive-temp/execution-cache.json` 以支持确认与恢复，但不改动源媒体，不生成正式 ASS/MKV/ZIP，也不做视频哈希、字体转换、NAS/字幕归档写入、维护表写入或整库媒体深检。内封 ASS/字体临时提取只使用附件 ID、轨道 ID 和允许的字体扩展名生成 `.archive-temp` 内部路径；MKV 原附件名只作元数据，不得参与输出路径。
 
+四个预置继续默认选择 `metadata`。自定义模式未选择 `metadata` 时，前检不读取元数据凭据、不构造客户端、不访问 TMDB/TVDB，并写入稳定的 `OFF / CAPABILITY_NOT_SELECTED` 结果；本地字幕、remux 和打包因此可完全离线。未选择元数据但选择最终输出能力时，`decisions.title` 必须提供已确认标题，否则返回 `TITLE_REQUIRED_WITHOUT_METADATA`。
+
 首次 `inspect` 执行上述完整前检。再次执行 `inspect --rerun` 时，先用“规范化路径、大小、修改时间”及相关工具/配置的轻量签名自动判定变化域，再按以下依赖复检；无变化的有效结果直接从同一个执行缓存复用，Movie PCM 只复用匹配唯一、同步成功且至少有 3 个有效采样点的结果，最终计划与前置确认摘要始终重新生成：
 
 - 视频变化：只重新读取变化文件的封装信息；涉及内封字幕时重查内封轨与附件；Movie 原盘音轨洗版只重跑对应分段的 PCM；
@@ -44,7 +46,7 @@ init → inspect → approve-preflight
 - 标题或库位相关配置变化：只重查维护表/NAS 库位；Movie 标题变化同时快速刷新字幕 ZIP 引用，不重跑 PCM；
 - Movie 压制版或原盘源变化：只重跑对应 `cdN`；其他分段继续复用；
 - 仅字幕顺序、默认项、压制组、章节等计划决定变化：只重建计划。
-- 元数据查询词、ID、语言、季序、代理、凭据存在性或本地 MKV/MP4、字幕相对路径列表变化：只重查元数据；MKA 变化不失效元数据，API 建议标题变化时同时重查库位。
+- 已选择元数据时，查询词、ID、语言、季序、代理、凭据存在性或本地 MKV/MP4、字幕相对路径列表变化：只重查元数据；MKA 变化不失效元数据，API 建议标题变化时同时重查库位。是否选择元数据也属于缓存键，切换后不得复用另一模式的结果。
 
 复检仍会快速确认所选能力需要的工具是否存在；用户要求“只检查字体”等范围不覆盖自动变化检测。若同时发现媒体变化，必须按依赖复检。组件缓存缺失、损坏、版本不兼容，或成功结果所依赖的临时提取文件丢失时，自动回退完整前检；不增加状态文件、公开步骤或确认关卡。前置确认以后发生输入、环境或目标变化仍按执行边界返回 `FAILED`，不得静默复检。
 
@@ -144,11 +146,11 @@ ZIP 使用存储模式并将最终中文条目统一写为 UTF-8；读取未设�
 - 维护表按 KDocs 上限分块；开始或重试时将实时目标列与“已完成块为本批次预期、未完成块为前检快照”的各合法前缀匹配，每块成功立即保存进度并从首个未完成块续传；无法匹配任何合法前缀才以 `TRACKER_CONCURRENT_CHANGE` 停止继续写入并失败；
 - 最终视频、ZIP 和维护表仍并行执行，上述检查不增加确认关卡。
 
-全部选中写入成功后，`cleanup` 只检查实际 `final_sinks` 对应的目标和检查点；它们必须位于任务目录外、存在且源/目标/检查点大小一致，才可删除整个任务目录。
+全部选中写入成功后，`cleanup` 首先要求 `final_sinks` 包含 `video`，且当前最终计划至少有一个视频任务；再检查当前批次全部视频及其他实际输出的完成检查点。目标必须位于任务目录外、存在且源/目标/检查点大小一致，才可删除整个任务目录。字幕 ZIP 或 KDocs 检查点不能替代视频检查点。
 
 ## 6. 状态、恢复与错误
 
-`.archive-state.json` 只保存 schema/rules_version、任务、分支、能力选择与最终输出、选中/完成步骤、用户决定、两次确认、已批准完整批次摘要、简洁最终目标、直接覆盖尝试和最终写入/维护表分块检查点。当前契约为 `STATE_SCHEMA=7`、`RULES_VERSION=18`；执行缓存为 `BACKEND_CACHE_SCHEMA=18`、工作流修订 `2026-08-25-capability-selection-v1`，旧状态不迁移。
+`.archive-state.json` 只保存 schema/rules_version、任务、分支、能力选择与最终输出、选中/完成步骤、用户决定、两次确认、已批准完整批次摘要、简洁最终目标、直接覆盖尝试和最终写入/维护表分块检查点。当前契约为 `STATE_SCHEMA=8`、`RULES_VERSION=19`；执行缓存为 `BACKEND_CACHE_SCHEMA=19`、工作流修订 `2026-08-25-hub-risk-fixes-v1`，能力预置版本为 `2`，旧状态不迁移。
 
 `.archive-temp/execution-cache.json` 保存详细计划、实际编号路径和执行结果。
 

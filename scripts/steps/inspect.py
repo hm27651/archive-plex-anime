@@ -45,7 +45,7 @@ def run(context):
         extra.append("--rerun")
     if decisions.get("title"):
         extra.extend(["--title", str(decisions["title"])])
-    if isinstance(decisions.get("metadata"), dict):
+    if "metadata" in state.get("resolved_capabilities", []) and isinstance(decisions.get("metadata"), dict):
         extra.extend(["--metadata-json", json.dumps(decisions["metadata"], ensure_ascii=False, separators=(",", ":"))])
     if state.get("branch") == "movie" and decisions.get("retain_embedded_subtitles"):
         extra.append("--retain-embedded-subtitles")

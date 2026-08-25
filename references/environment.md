@@ -21,7 +21,7 @@ Movie 字幕归档：  paths.movieSubtitleArchiveRoot
 
 工具来自配置的 `tools`：Python、MediaInfo CLI、MKVToolNix (`mkvmerge`/`mkvinfo`)、assfonts、otf2ttf、ffmpeg/ffprobe、KDocs CLI。inspect 按所选能力检查：普通任务不检查 FFmpeg/FFprobe/mkvinfo；它们只用于 Movie 原盘音轨洗版。assfonts 只在本次选择字幕处理且存在外挂/提取 ASS 时要求；otf2ttf 只在 assfonts 实际失败并命中 OTF/CFF 候选后检查；KDocs 只在启用维护表且任务包含最终写入时要求。`paths.fallbackFontDatabase` 指向 `fc-subs.db`；未填时默认使用完整字体库根目录下的同名文件。
 
-`metadata` 默认启用 TMDB 主来源、TVDB 辅助来源及 TMDB 季序。`metadata.proxy` 只应用于这两个 API；空值表示显式直连。API 不是 `tools` 外部可执行文件，不参与工具存在性检查。
+`metadata` 默认启用 TMDB 主来源、TVDB 辅助来源及 TMDB 季序。`metadata.proxy` 只应用于这两个 API；空值表示显式直连。API 不是 `tools` 外部可执行文件，不参与工具存在性检查。四个预置默认选择元数据；自定义能力未包含 `metadata` 时完全不读取上述凭据或访问 API。自定义最终输出同时关闭元数据时，必须在决定中提供明确的 `title`。
 
 ## 安装与跨机使用
 
@@ -67,7 +67,24 @@ Movie 字幕归档：  paths.movieSubtitleArchiveRoot
 
 实际分支使用 `--branch tv` 或 `--branch movie`；模式使用 `complete-archive`、`replacement`、`archive-only`、`local-only`。只执行状态中的 `selected_steps`，不手工补步骤。新调用优先使用公开 `--capabilities`；不含最终输出的自定义选择自动按 local-only 规划。local-only 的兼容 `--steps` 只接受 `movie-audio`、`subtitle`、`remux`、`package`（`inspect` 自动执行）。Hub 调用必须增加 `--entrypoint hub`，其能力目录和任务状态不会包含 KDocs。
 
+`cleanup` 会自动依赖 `video-delivery`，只有字幕 ZIP 或维护表输出时不得执行。未选择 `metadata` 的自定义最终输出必须通过 `--decisions-stdin` 提供 `title`。
+
 用户决定仅支持 `--decisions-stdin`，不支持命令行 JSON 参数或人工计划文件。
+
+## 开发验证
+
+先安装固定版本的开发检查依赖：
+
+```powershell
+python -m pip install -r requirements-dev.txt
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:PYTHONUTF8='1'
+python -B -m unittest discover -s scripts/tests -p 'test_*.py'
+ruff check --no-cache scripts
+git diff --check
+```
+
+GitHub Actions 在 Python 3.11 的 Windows 与 Linux 环境执行相同测试和 Ruff 检查。测试和发布内容不得包含 `.pyc`、`__pycache__`、运行缓存、凭据或本机私有资料。
 
 ## PowerShell UTF-8 JSON 模板
 

@@ -22,6 +22,8 @@ def run(context):
     state = context["state"]
     if "finalize" not in state.get("completed_steps", []):
         return result("NEEDS_USER", "cleanup requires completed finalize step")
+    if "video" not in state.get("final_sinks", []):
+        return result("FAILED", "cleanup requires video delivery in final_sinks")
     resolved = work.resolve()
     config = load_config()
     root_key = "workRoot" if state.get("branch") == "tv" else "movieWorkRoot" if state.get("branch") == "movie" else ""
@@ -36,6 +38,9 @@ def run(context):
         return result("FAILED", "cleanup requires the final internal plan")
     manifest = json.loads(read_text(manifest_path))
     final = manifest.get("finalPreparation", {}).get("final", {})
+    video_jobs = final.get("video", [])
+    if not isinstance(video_jobs, list) or not video_jobs:
+        return result("FAILED", "cleanup requires at least one completed video delivery")
     checkpoints = load_state(work).get("final_results", {})
     batch = str(final.get("batchId") or "")
     if not batch or checkpoints.get("batch_id") != batch:

@@ -23,7 +23,9 @@ description: Use when inspecting, organizing, subtitling, remuxing, packaging, a
 
 `local-only` 不选择 `review`：各本地步骤当场执行与 review 相同的产物验收，显式请求 `review` 返回 `LOCAL_STEP_UNSUPPORTED`。`review` 只用于需要准备最终 NAS、字幕归档和维护表动作的任务。
 
-四个模式也是版本化预置工作流。用户要求按需执行时，改用自定义能力选择：`inspect`、`metadata`、`movie-audio`、`subtitle`、`remux`、`subtitle-package`、`video-delivery`、`subtitle-delivery`、`kdocs-tracker`、`cleanup`。只选择公开能力，不直接选择 `prepare-fonts`、`subset`、`rename`、`review` 或 `finalize`；统一解析器负责依赖、冲突、实际可用性、内部步骤和最终输出。预置与自定义选择不混用；自定义选择不含最终输出能力时自动按 `local-only` 规划。
+四个模式也是版本化预置工作流。用户要求按需执行时，改用自定义能力选择：`inspect`、`metadata`、`movie-audio`、`subtitle`、`remux`、`subtitle-package`、`video-delivery`、`subtitle-delivery`、`kdocs-tracker`、`cleanup`。只选择公开能力，不直接选择 `prepare-fonts`、`subset`、`rename`、`review` 或 `finalize`；统一解析器负责依赖、冲突、实际可用性、内部步骤和最终输出。预置与自定义选择不混用；自定义选择不含最终输出能力时自动按 `local-only` 规划。`cleanup` 必须自动补齐 `video-delivery`，字幕 ZIP 或维护表不能单独解锁清理。
+
+四个预置继续默认选择 `metadata`。自定义选择未包含 `metadata` 时必须完全离线，不读取元数据凭据、不构造客户端、不访问 TMDB/TVDB；若同时选择最终输出，必须用 `decisions.title` 提供已确认标题。
 
 CLI 与本独立 Skill 保留 KDocs。作为 Hub 入口运行时必须使用 `--entrypoint hub`，能力目录、前检、配置和执行均不得出现 `kdocs-tracker`；不得由 Hub 自行补回维护表动作。
 
@@ -77,12 +79,12 @@ init → inspect → 前置确认
 - 所有 NAS 视频和字幕 ZIP 最终目标必须位于任务目录外；`review` 准备最终批次时拒绝重叠目标，`cleanup` 删除前再次检查。
 - `create` 在准备最终批次及实际复制前确认目标仍不存在；只有本批次已记录的直接覆盖半文件可重试。`replace` 经最终确认后直接覆盖。维护表写入前按已完成块与本批次预期、未完成块与前检快照核对；每块成功立即保存进度，真正的外部变化才零写入失败。
 - 每条预期轨道必须完整声明名称、语言、默认、强制及适用的声道信息，封装命令显式写入这些 flag；Movie 关闭章节时参数必须作用于主媒体输入，TV 使用外挂 ASS 时不得继承源附件。
-- 清理永远最后执行。任何最终写入失败均保留任务目录。
+- 清理永远最后执行。清理前必须证明当前批次至少一个视频已安全写入任务目录外，并验证全部实际输出检查点；任何最终写入失败或视频证明缺失均保留任务目录。
 - 中文路径、ASS、JSON、日志和 KDocs stdin 使用 UTF-8；外部程序使用参数数组，不用 `shell=True`。
 
 ## 计划、状态与后端
 
-计划只列本次选中的工作流步骤，不向用户展开逐文件命令或产物对象。保留最小 `.archive-state.json`，并记录 `selection_mode`、`preset`/`preset_version`、`entrypoint`、请求/解析/自动补齐/不可用能力、`selected_steps` 和实际 `final_sinks`；详细计划、实际编号路径和执行结果只写 `.archive-temp/execution-cache.json`。属于当前目录且 schema、工作流版本与 inspect 状态有效的前检缓存，即使包含 `NEEDS_USER` 也保存 inspect 检查点；工具、媒体或缓存硬失败不保存。
+计划只列本次选中的工作流步骤，不向用户展开逐文件命令或产物对象。保留最小 `.archive-state.json`，并记录 `selection_mode`、`preset`/`preset_version`、`entrypoint`、请求/解析/自动补齐/不可用能力、`selected_steps` 和实际 `final_sinks`；详细计划、实际编号路径和执行结果只写 `.archive-temp/execution-cache.json`。当前契约为 `STATE_SCHEMA=8`、`RULES_VERSION=19`、`BACKEND_CACHE_SCHEMA=19`、预置版本 `2`，旧状态不迁移。属于当前目录且 schema、工作流版本与 inspect 状态有效的前检缓存，即使包含 `NEEDS_USER` 也保存 inspect 检查点；工具、媒体或缓存硬失败不保存。
 
 首次 `inspect` 执行完整前检；`inspect --rerun` 只用路径、大小和修改时间比较视频、字幕、工作目录字体、字体索引、库位输入及 Movie 原盘音轨源，复用未变化的有效结果，只重跑受影响组件。Movie 堆叠片按 `cdN` 独立复用已成功的 PCM 结果；计划摘要始终重新生成。缓存缺失、损坏或版本不兼容时自动回退完整前检，不增加状态文件、公开步骤或确认关卡。
 

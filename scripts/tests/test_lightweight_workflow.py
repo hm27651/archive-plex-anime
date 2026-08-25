@@ -43,6 +43,13 @@ def valid_state(**values) -> dict:
 
 
 class LightweightWorkflowTests(unittest.TestCase):
+    def setUp(self):
+        self.config_patcher = mock.patch.object(workflow, "load_config", return_value={"paths": {}})
+        self.config_patcher.start()
+
+    def tearDown(self):
+        self.config_patcher.stop()
+
     def test_public_metadata_summary_explains_automatic_query_source(self):
         summary = public_metadata_summary(
             {

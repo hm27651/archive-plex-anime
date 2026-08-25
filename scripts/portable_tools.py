@@ -16,6 +16,7 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
+import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -278,10 +279,31 @@ def create_deterministic_tar(source: Path, output: Path) -> None:
                         raise PortableToolError(f"portable package cannot contain links or special files: {relative}")
 
 
+def create_deterministic_zip(source: Path, output: Path) -> None:
+    source = source.resolve(strict=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        for path in sorted(source.rglob("*"), key=lambda item: item.relative_to(source).as_posix()):
+            relative = path.relative_to(source).as_posix()
+            if path.is_symlink() or not (path.is_dir() or path.is_file()):
+                raise PortableToolError(f"portable package cannot contain links or special files: {relative}")
+            name = f"{relative}/" if path.is_dir() else relative
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.compress_type = zipfile.ZIP_DEFLATED
+            executable_tree = relative.startswith("tools/") and path.suffix.casefold() in {".exe", ".cmd", ".bat"}
+            mode = 0o755 if path.is_dir() or executable_tree else 0o644
+            info.external_attr = ((stat.S_IFDIR if path.is_dir() else stat.S_IFREG) | mode) << 16
+            if path.is_dir():
+                archive.writestr(info, b"")
+            else:
+                archive.writestr(info, path.read_bytes())
+
+
 def extract_portable_tar(archive: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     root = destination.resolve(strict=True)
-    with tarfile.open(archive, "r:gz") as source:
+    with tarfile.open(archive, "r:*") as source:
         for member in source.getmembers():
             relative = _safe_member_path(member.name)
             target = destination.joinpath(*relative.parts)
@@ -301,6 +323,73 @@ def extract_portable_tar(archive: Path, destination: Path) -> None:
             with target.open("wb") as output:
                 shutil.copyfileobj(stream, output)
             target.chmod(member.mode & 0o777)
+
+
+def _extract_portable_zip(archive: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    root = destination.resolve(strict=True)
+    with zipfile.ZipFile(archive) as source:
+        for member in source.infolist():
+            relative = _safe_member_path(member.filename.rstrip("/"))
+            target = destination.joinpath(*relative.parts)
+            resolved = target.resolve(strict=False)
+            if root != resolved and root not in resolved.parents:
+                raise PortableToolError(f"archive path escapes extraction root: {member.filename}")
+            mode = member.external_attr >> 16
+            if stat.S_ISLNK(mode):
+                raise PortableToolError(f"portable archive contains a link: {member.filename}")
+            if member.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with source.open(member) as stream, target.open("wb") as output:
+                shutil.copyfileobj(stream, output)
+            if mode & 0o111:
+                target.chmod(0o755)
+
+
+def _extract_portable_7z(archive: Path, destination: Path) -> None:
+    executable = shutil.which("7z") or shutil.which("7z.exe")
+    members: list[str] = []
+    if executable is not None:
+        listed = _run([executable, "l", "-slt", str(archive)])
+        for line in listed.stdout.splitlines():
+            if not line.startswith("Path = "):
+                continue
+            value = line[7:].strip()
+            if value and Path(value).name != archive.name:
+                _safe_member_path(value.replace("\\", "/"))
+                members.append(value)
+    else:
+        tar = shutil.which("tar")
+        if tar is None:
+            raise PortableToolError("7z or a libarchive-compatible tar is required for 7z inputs")
+        listed = _run([tar, "-tf", str(archive)])
+        for value in listed.stdout.splitlines():
+            if value.strip():
+                _safe_member_path(value.strip().replace("\\", "/").rstrip("/"))
+                members.append(value.strip())
+    if not members:
+        raise PortableToolError(f"7z archive is empty: {archive}")
+    destination.mkdir(parents=True, exist_ok=True)
+    if executable is not None:
+        _run([executable, "x", "-y", f"-o{destination}", str(archive)])
+    else:
+        _run([tar, "-xf", str(archive), "-C", str(destination)])
+    for path in destination.rglob("*"):
+        if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            raise PortableToolError(f"7z archive contains a link or special file: {path}")
+
+
+def extract_portable_archive(archive: Path, destination: Path, archive_format: str) -> None:
+    if archive_format in {"tar.gz", "tar.xz"}:
+        extract_portable_tar(archive, destination)
+    elif archive_format == "zip":
+        _extract_portable_zip(archive, destination)
+    elif archive_format == "7z":
+        _extract_portable_7z(archive, destination)
+    else:
+        raise PortableToolError(f"unsupported portable archive format: {archive_format}")
 
 
 def _version(tool_id: str, root: Path) -> str:

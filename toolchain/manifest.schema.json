@@ -8,7 +8,8 @@
     "schema_version",
     "manifest_version",
     "generated_contract_version",
-    "tools"
+    "tools",
+    "toolsets"
   ],
   "properties": {
     "schema_version": {
@@ -19,13 +20,20 @@
       "minLength": 1
     },
     "generated_contract_version": {
-      "const": 1
+      "type": "integer",
+      "enum": [1, 2]
     },
     "tools": {
       "type": "array",
       "minItems": 1,
       "items": {
         "$ref": "#/$defs/tool"
+      }
+    },
+    "toolsets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/toolset"
       }
     }
   },
@@ -99,6 +107,92 @@
         "executable_paths": {
           "type": "array",
           "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "toolset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "toolset_id",
+        "version",
+        "platform",
+        "architecture",
+        "artifact_url",
+        "filename",
+        "sha256",
+        "size",
+        "archive_format",
+        "manifest_path",
+        "tool_ids",
+        "fixture_paths",
+        "license_paths"
+      ],
+      "properties": {
+        "toolset_id": {
+          "const": "hub"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "platform": {
+          "type": "string",
+          "enum": ["windows", "linux"]
+        },
+        "architecture": {
+          "type": "string",
+          "enum": ["x64", "amd64", "arm64"]
+        },
+        "artifact_url": {
+          "type": "string",
+          "pattern": "^https://"
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "archive_format": {
+          "type": "string",
+          "enum": ["zip", "tar.gz"]
+        },
+        "manifest_path": {
+          "const": "toolset.json"
+        },
+        "tool_ids": {
+          "type": "array",
+          "minItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          }
+        },
+        "fixture_paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "license_paths": {
+          "type": "array",
+          "minItems": 4,
           "uniqueItems": true,
           "items": {
             "type": "string",

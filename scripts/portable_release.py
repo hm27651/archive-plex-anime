@@ -13,6 +13,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TOOL_IDS = ("mediainfo", "mkvtoolnix", "ffmpeg", "assfonts")
 ARCHITECTURES = ("amd64", "arm64")
+TOOLSET_TARGETS = (("windows", "x64"), ("linux", "amd64"), ("linux", "arm64"))
 
 
 class ReleaseError(RuntimeError):
@@ -78,16 +79,60 @@ def _metadata(dist: Path, *, require_artifacts: bool = True) -> dict[tuple[str, 
     return values
 
 
+def _toolset_metadata(dist: Path, *, require_artifacts: bool = True) -> dict[tuple[str, str], dict[str, Any]]:
+    values: dict[tuple[str, str], dict[str, Any]] = {}
+    for platform_name, architecture in TOOLSET_TARGETS:
+        extension = "zip" if platform_name == "windows" else "tar.gz"
+        filename = f"hub-toolset-{platform_name}-{architecture}.{extension}"
+        item = _read_json(dist / f"{filename}.json")
+        report_path = dist / f"capability-report-hub-toolset-{platform_name}-{architecture}.json"
+        report = _read_json(report_path)
+        capabilities = [
+            capability
+            for tool in report.get("tools", [])
+            if isinstance(tool, dict)
+            for capability in tool.get("capabilities", [])
+            if isinstance(capability, dict)
+        ]
+        if (
+            item.get("toolset_id") != "hub"
+            or item.get("platform") != platform_name
+            or item.get("architecture") != architecture
+            or item.get("native_built") is not True
+            or item.get("tool_ids") != list(TOOL_IDS)
+            or report.get("kind") != "hub_toolset"
+            or report.get("platform") != platform_name
+            or report.get("architecture") != architecture
+            or report.get("native_verified") is not True
+            or report.get("toolset") != item
+            or [tool.get("tool_id") for tool in report.get("tools", [])] != list(TOOL_IDS)
+            or not capabilities
+            or any(capability.get("status") != "ready" for capability in capabilities)
+        ):
+            raise ReleaseError(f"Hub toolset evidence is invalid: {filename}")
+        artifact = dist / filename
+        if require_artifacts and (
+            not artifact.is_file()
+            or artifact.stat().st_size != item.get("size")
+            or _sha256(artifact) != item.get("sha256")
+        ):
+            raise ReleaseError(f"Hub toolset file does not match metadata: {filename}")
+        values[(platform_name, architecture)] = item
+    return values
+
+
 def prepare_release(dist: Path, tag: str, notes_path: Path) -> dict[str, Any]:
     values = _metadata(dist)
+    toolsets = _toolset_metadata(dist)
     index = {
-        "schema_version": 1,
+        "schema_version": 2,
         "release_tag": tag,
         "verification": {
             "amd64": "clean python:3.11-slim-bookworm on native GitHub runner ubuntu-24.04",
             "arm64": "clean python:3.11-slim-bookworm on native GitHub runner ubuntu-24.04-arm",
         },
         "artifacts": [values[(tool_id, architecture)] for tool_id in TOOL_IDS for architecture in ARCHITECTURES],
+        "toolsets": [toolsets[target] for target in TOOLSET_TARGETS],
     }
     index_path = dist / "portable-tools-index.json"
     index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -104,6 +149,12 @@ def prepare_release(dist: Path, tag: str, notes_path: Path) -> dict[str, Any]:
         for architecture in ARCHITECTURES:
             item = values[(tool_id, architecture)]
             lines.append(f"| {tool_id} | {architecture} | {item['version']} | `{item['sha256']}` |")
+    lines.extend(("", "| Hub toolset | Version | SHA-256 |", "|---|---|---|"))
+    for target in TOOLSET_TARGETS:
+        item = toolsets[target]
+        lines.append(
+            f"| {target[0]}/{target[1]} | {item['version']} | `{item['sha256']}` |"
+        )
     lines.extend(
         (
             "",
@@ -118,8 +169,10 @@ def prepare_release(dist: Path, tag: str, notes_path: Path) -> dict[str, Any]:
 
 def update_manifest(dist: Path, tag: str, manifest_version: str, manifest_path: Path) -> None:
     values = _metadata(dist, require_artifacts=False)
+    toolsets = _toolset_metadata(dist, require_artifacts=False)
     manifest = _read_json(manifest_path)
     manifest["manifest_version"] = manifest_version
+    manifest["generated_contract_version"] = 2
     tools = {item["tool_id"]: item for item in manifest["tools"]}
     for tool_id in TOOL_IDS:
         tool = tools[tool_id]
@@ -144,6 +197,28 @@ def update_manifest(dist: Path, tag: str, manifest_version: str, manifest_path: 
                 }
             )
         tool["artifacts"] = windows + linux
+    manifest["toolsets"] = [
+        {
+            "toolset_id": "hub",
+            "version": item["version"],
+            "platform": target[0],
+            "architecture": target[1],
+            "artifact_url": (
+                "https://github.com/hm27651/archive-plex-anime/releases/download/"
+                f"{tag}/{item['filename']}"
+            ),
+            "filename": item["filename"],
+            "sha256": item["sha256"],
+            "size": item["size"],
+            "archive_format": item["archive_format"],
+            "manifest_path": item["manifest_path"],
+            "tool_ids": item["tool_ids"],
+            "fixture_paths": item["fixture_paths"],
+            "license_paths": item["license_paths"],
+        }
+        for target in TOOLSET_TARGETS
+        for item in (toolsets[target],)
+    ]
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 

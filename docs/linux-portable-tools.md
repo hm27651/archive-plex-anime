@@ -41,4 +41,10 @@
 
 ## 与 Hub 的边界
 
-这些制品完成的是 archive 阶段的“工具准备”。它们不会让 Hub 自动开始 BDRip，也不包含 TV、Movie、字幕、NAS、清理、KDocs 或 ani-rss 规则。Hub 必须在后续提交中固定本仓库完整提交并实现下载、校验、安全解压、`/app/data/archive-tools` 持久化、原子启用及失败回退后，才能称为 fnOS 基础版一键安装完成。
+这些制品完成的是 archive 阶段的“工具准备”。它们不会让 Hub 自动开始 BDRip，也不包含 TV、Movie、字幕、NAS、清理、KDocs 或 ani-rss 规则。Hub 只在镜像或安装包构建期消费固定工具集，运行时不下载、解压、启用或回退工具。
+
+## Hub 工具集 v2
+
+下一代 Hub 投影在现有单工具制品之上增加 Windows x64、Linux amd64、Linux arm64 三个整包。整包由 `scripts/hub_toolset.py` 组装，每项工具保留独立版本目录，并统一携带 `toolset.json`、DejaVu Sans 测试字体和许可证索引。
+
+整包自身 URL、大小和 SHA-256 只记录在外层投影，包内 `toolset.json` 记录内容、来源单工具摘要和相对路径，避免让归档文件摘要引用自身。正式发布必须在三个原生平台的全新运行环境中通过整包能力检查；在固定 Release 产生前，`manifest.json` 继续保持 v1 投影和空 `toolsets`，不得写入占位 URL 或摘要。

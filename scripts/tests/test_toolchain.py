@@ -9,6 +9,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -20,10 +21,34 @@ if str(SCRIPTS) not in sys.path:
 
 import toolchain  # noqa: E402
 import portable_tools  # noqa: E402
+import hub_toolset  # noqa: E402
 import workflow  # noqa: E402
 
 
 class ToolManifestTests(unittest.TestCase):
+    def v2_toolsets(self) -> list[dict]:
+        values = []
+        for platform_name, architecture in sorted(toolchain.SUPPORTED_PLATFORMS):
+            extension = "zip" if platform_name == "windows" else "tar.gz"
+            values.append(
+                {
+                    "toolset_id": "hub",
+                    "version": "test-v2",
+                    "platform": platform_name,
+                    "architecture": architecture,
+                    "artifact_url": f"https://example.invalid/hub-toolset-{platform_name}-{architecture}.{extension}",
+                    "filename": f"hub-toolset-{platform_name}-{architecture}.{extension}",
+                    "sha256": "a" * 64,
+                    "size": 1,
+                    "archive_format": extension,
+                    "manifest_path": "toolset.json",
+                    "tool_ids": list(toolchain.HUB_TOOL_IDS),
+                    "fixture_paths": ["fixtures/fonts/DejaVuSans.ttf"],
+                    "license_paths": [f"licenses/{tool_id}/SOURCE.json" for tool_id in toolchain.HUB_TOOL_IDS],
+                }
+            )
+        return values
+
     def test_manifest_matches_schema_and_has_unique_public_ids(self):
         manifest = toolchain.load_manifest()
         tool_ids = [item["tool_id"] for item in manifest["tools"]]
@@ -192,6 +217,38 @@ class ToolManifestTests(unittest.TestCase):
             toolchain.validate_manifest(invalid_order)
         self.assertEqual(raised.exception.code, "MANIFEST_ARTIFACT_EXECUTABLE_MISMATCH")
 
+    def test_v2_manifest_requires_complete_safe_namespaced_toolsets(self):
+        manifest = copy.deepcopy(toolchain.load_manifest())
+        manifest["generated_contract_version"] = 2
+        manifest["toolsets"] = self.v2_toolsets()
+        self.assertIs(toolchain.validate_manifest(manifest), manifest)
+
+        missing = copy.deepcopy(manifest)
+        missing["toolsets"].pop()
+        with self.assertRaises(toolchain.ToolchainError) as raised:
+            toolchain.validate_manifest(missing)
+        self.assertEqual(raised.exception.code, "MANIFEST_TOOLSET_MISSING")
+
+        unsafe = copy.deepcopy(manifest)
+        unsafe["toolsets"][0]["fixture_paths"] = ["../DejaVuSans.ttf"]
+        with self.assertRaises(toolchain.ToolchainError) as raised:
+            toolchain.validate_manifest(unsafe)
+        self.assertEqual(raised.exception.code, "MANIFEST_TOOLSET_PATH_UNSAFE")
+
+    def test_v2_hub_projection_exports_toolsets_without_changing_skill_projection(self):
+        manifest = copy.deepcopy(toolchain.load_manifest())
+        manifest["generated_contract_version"] = 2
+        manifest["toolsets"] = self.v2_toolsets()
+        with mock.patch.object(toolchain, "load_manifest", return_value=manifest):
+            with mock.patch.object(toolchain, "_source_commit", return_value="a" * 40):
+                hub = toolchain.export_projection("hub")
+                skill = toolchain.export_projection("skill")
+
+        self.assertEqual(hub["schema_version"], 2)
+        self.assertEqual(len(hub["toolsets"]), 3)
+        self.assertNotIn("toolsets", skill)
+        self.assertIn("kdocs-cli", {item["id"] for item in skill["tools"]})
+
 
 class PortableArchiveTests(unittest.TestCase):
     def test_deterministic_tar_has_stable_bytes_and_normalized_metadata(self):
@@ -230,6 +287,75 @@ class PortableArchiveTests(unittest.TestCase):
                 with self.subTest(name=name):
                     with self.assertRaises(portable_tools.PortableToolError):
                         portable_tools.extract_portable_tar(archive, root / f"extract-{name}")
+
+    def test_deterministic_zip_has_stable_bytes_and_rejects_links(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "package"
+            (source / "tools" / "demo").mkdir(parents=True)
+            (source / "tools" / "demo" / "demo.exe").write_bytes(b"binary")
+            first = root / "first.zip"
+            second = root / "second.zip"
+            portable_tools.create_deterministic_zip(source, first)
+            portable_tools.create_deterministic_zip(source, second)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+
+            unsafe = root / "unsafe.zip"
+            with zipfile.ZipFile(unsafe, "w") as archive:
+                archive.writestr("../escape.txt", "escape")
+            with self.assertRaises(portable_tools.PortableToolError):
+                portable_tools.extract_portable_archive(unsafe, root / "unsafe-output", "zip")
+
+
+class HubToolsetTests(unittest.TestCase):
+    def test_windows_toolset_is_deterministic_and_namespaces_each_tool(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inputs = root / "inputs"
+            outputs = root / "outputs"
+            inputs.mkdir()
+            manifest = copy.deepcopy(toolchain.load_manifest())
+            for tool in manifest["tools"]:
+                if tool["tool_id"] not in toolchain.HUB_TOOL_IDS:
+                    continue
+                artifact = next(item for item in tool["artifacts"] if item["platform"] == "windows")
+                artifact["archive_format"] = "zip"
+                artifact["filename"] = f"{tool['tool_id']}.zip"
+                path = inputs / artifact["filename"]
+                with zipfile.ZipFile(path, "w") as archive:
+                    for executable_path in artifact["executable_paths"]:
+                        archive.writestr(executable_path, b"fake")
+                    archive.writestr("LICENSE", f"license for {tool['tool_id']}")
+                artifact["size"] = path.stat().st_size
+                artifact["sha256"] = portable_tools._sha256(path)
+
+            def fake_fixture(package_root: Path, _work: Path):
+                font = package_root / "fixtures" / "fonts" / "DejaVuSans.ttf"
+                license_path = package_root / "licenses" / "dejavu-fonts" / "LICENSE"
+                font.parent.mkdir(parents=True)
+                license_path.parent.mkdir(parents=True)
+                font.write_bytes(b"font")
+                license_path.write_text("font license", encoding="utf-8")
+                return font.relative_to(package_root).as_posix(), license_path.relative_to(package_root).as_posix()
+
+            with mock.patch.object(hub_toolset.toolchain, "load_manifest", return_value=manifest):
+                with mock.patch.object(hub_toolset, "_fixture", side_effect=fake_fixture):
+                    with mock.patch.object(hub_toolset, "_native_target"):
+                        first = hub_toolset.assemble("windows", "x64", "test-v2", inputs, outputs)
+                        first_bytes = (outputs / first["filename"]).read_bytes()
+                        second = hub_toolset.assemble("windows", "x64", "test-v2", inputs, outputs)
+
+            self.assertEqual(first, second)
+            self.assertEqual(first_bytes, (outputs / second["filename"]).read_bytes())
+            with tempfile.TemporaryDirectory() as extracted:
+                portable_tools.extract_portable_archive(
+                    outputs / first["filename"], Path(extracted), first["archive_format"]
+                )
+                toolset = json.loads((Path(extracted) / "toolset.json").read_text(encoding="utf-8"))
+                self.assertEqual(toolset["tool_ids"], list(toolchain.HUB_TOOL_IDS))
+                for tool_id in toolchain.HUB_TOOL_IDS:
+                    self.assertTrue((Path(extracted) / "tools" / tool_id).is_dir())
+                    self.assertTrue((Path(extracted) / "licenses" / tool_id / "SOURCE.json").is_file())
 
 
 class ToolVersionTests(unittest.TestCase):

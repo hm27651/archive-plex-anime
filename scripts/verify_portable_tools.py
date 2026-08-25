@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -27,9 +28,12 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _check_dependencies(root: Path, executables: list[str]) -> None:
+    environment = {**os.environ, "LD_LIBRARY_PATH": str(root / "lib")}
     for name in executables:
         binary = root / "libexec" / name
-        completed = subprocess.run(["ldd", str(binary)], capture_output=True, text=True, check=False)
+        completed = subprocess.run(
+            ["ldd", str(binary)], capture_output=True, text=True, check=False, env=environment
+        )
         output = completed.stdout + "\n" + completed.stderr
         if "not found" in output:
             raise portable_tools.PortableToolError(f"portable {name} has a missing dynamic library: {output}")

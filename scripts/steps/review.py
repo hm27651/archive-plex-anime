@@ -35,12 +35,14 @@ def run(context):
         tracker_plan = final_payload.get("trackerPlan") or {}
         state["final_target"] = {
             "library": final.get("library"),
-            "video_root": video_root,
+            "video_root": str(final_payload.get("targetRoot") or video_root),
             "zip": str(zip_jobs[0].get("destination", "")) if zip_jobs else "",
             "tracker_column": str(tracker_plan.get("column") or "") if tracker_plan else "",
             "operation": final.get("mode"),
             "batch_id": final.get("batchId"),
             "batch_digest": final.get("batchDigest") or final_payload.get("batchDigest"),
+            "target_summary": final.get("targetSummary") or final_payload.get("targetSummary") or {},
+            "target_conflicts": final.get("targetConflicts") or final_payload.get("targetConflicts") or [],
         }
         state.setdefault("approvals", {})["final"] = False
         state.pop("approved_final_digest", None)
@@ -59,4 +61,6 @@ def run(context):
         warnings=warnings,
         artifacts=artifacts,
         final_target=state.get("final_target", {}),
+        target_summary=state.get("final_target", {}).get("target_summary", {}),
+        target_conflicts=state.get("final_target", {}).get("target_conflicts", []),
     )

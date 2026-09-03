@@ -95,7 +95,21 @@ def build_plan(work: Path, manifest: dict[str, Any], state: dict[str, Any]) -> d
         )
     else:
         generated = {"plan": {}, "issues": [{"code": "BRANCH_REQUIRED"}], "summary": {}}
-    issues.extend(generated.get("issues", []))
+    generated_issues = generated.get("issues", [])
+    requested_final_sinks = state.get("requested_final_sinks")
+    if isinstance(requested_final_sinks, list) and "subtitle_zip" not in requested_final_sinks:
+        generated_issues = [
+            issue
+            for issue in generated_issues
+            if issue.get("code") != "SUBTITLE_ARCHIVE_ROOT_REQUIRED"
+        ]
+    issues.extend(generated_issues)
+    if (
+        state.get("entrypoint") == "hub"
+        and task != "local-only"
+        and not isinstance(decisions.get("staging"), dict)
+    ):
+        issues.append({"code": "STAGING_OUTPUT_REQUIRED"})
     plan = generated.get("plan", {})
     library_target = manifest.get("discovery", {}).get("libraryTarget")
     if plan and task != "local-only" and library_target:

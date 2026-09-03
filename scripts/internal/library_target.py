@@ -51,30 +51,42 @@ def nas_candidates(library_roots: dict[str, Path], title: str, branch: str) -> l
         for directory in root.iterdir():
             if not directory.is_dir() or normalize_title(directory.name, branch).casefold() != normalized:
                 continue
-            item: dict[str, Any] = {
-                "library": library,
-                "path": str(directory.resolve()),
-                "name": directory.name,
-                "webrip": branch == "tv" and is_webrip_marked(directory.name),
-            }
-            if branch == "tv":
-                item["seasons"] = [
-                    {
-                        "path": str(child.resolve()),
-                        "name": child.name,
-                        "webrip": is_webrip_marked(child.name),
-                    }
-                    for child in directory.iterdir()
-                    if child.is_dir()
-                ]
-            else:
-                single = directory / f"{title}.mkv"
-                stacked = sorted(directory.glob(f"{title}.cd[1-9]*.mkv"), key=lambda value: value.name.casefold())
-                movies = [single] if single.is_file() else stacked
-                item["mkvs"] = [str(movie.resolve()) for movie in movies if movie.is_file()]
-                item["mkv"] = item["mkvs"][0] if len(item["mkvs"]) == 1 else ""
-            found.append(item)
+            found.append(nas_directory_candidate(library, directory, branch, title=title))
     return found
+
+
+def nas_directory_candidate(
+    library: str,
+    directory: Path,
+    branch: str,
+    *,
+    title: str = "",
+) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "library": library,
+        "path": str(directory.resolve()),
+        "name": directory.name,
+        "webrip": branch == "tv" and is_webrip_marked(directory.name),
+    }
+    if branch == "tv":
+        item["seasons"] = [
+            {
+                "path": str(child.resolve()),
+                "name": child.name,
+                "webrip": is_webrip_marked(child.name),
+            }
+            for child in directory.iterdir()
+            if child.is_dir()
+        ]
+    else:
+        movies = sorted(directory.glob("*.mkv"), key=lambda value: value.name.casefold())
+        if title:
+            exact = directory / f"{title}.mkv"
+            stacked = sorted(directory.glob(f"{title}.cd[1-9]*.mkv"), key=lambda value: value.name.casefold())
+            movies = [exact] if exact.is_file() else stacked or movies
+        item["mkvs"] = [str(movie.resolve()) for movie in movies if movie.is_file()]
+        item["mkv"] = item["mkvs"][0] if len(item["mkvs"]) == 1 else ""
+    return item
 
 
 def resolve_target(
@@ -82,6 +94,8 @@ def resolve_target(
     tracker: list[dict[str, Any]],
     nas: list[dict[str, Any]],
     preferred_library: str,
+    *,
+    allow_nas_only: bool = False,
 ) -> dict[str, Any]:
     if not tracker and not nas:
         return {"status": "OK", "mode": "create", "library": preferred_library}
@@ -94,6 +108,19 @@ def resolve_target(
             "branch": branch,
             "tracker": tracker,
             "nas": nas,
+        }
+    if allow_nas_only and not tracker and len(nas) == 1:
+        selected_nas = nas[0]
+        webrip = branch == "tv" and bool(
+            selected_nas.get("webrip")
+            or any(item.get("webrip") for item in selected_nas.get("seasons", []))
+        )
+        return {
+            "status": "OK",
+            "mode": "tv-webrip-to-bdrip" if webrip else "replace",
+            "library": selected_nas["library"],
+            "tracker": None,
+            "nas": selected_nas,
         }
     if not tracker or not nas:
         return {

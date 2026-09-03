@@ -8,7 +8,13 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
-from archive_rules import package_path, tv_subtitle_path, tv_video_path, tv_video_relative
+from archive_rules import (
+    artifact_output_root,
+    package_path,
+    tv_subtitle_path,
+    tv_video_path,
+    tv_video_relative,
+)
 from common import read_text
 from plan_common import (
     archive_only_expected_tracks,
@@ -29,6 +35,7 @@ COMMENTARY_RE = re.compile(r"commentary|评论|解说", re.IGNORECASE)
 SEASON_RE = re.compile(r"^(?:s|season\s*)(\d{1,2})$", re.IGNORECASE)
 EPISODE_PATTERNS = (
     re.compile(r"s\d{1,2}e(\d{1,3})", re.IGNORECASE),
+    re.compile(r"(?:^|[\s._\-(])(?:ep?|e)\s*(\d{1,3})(?:v\d+)?(?=$|[\s._\-)\[])", re.IGNORECASE),
     re.compile(r"\[(\d{1,3})(?:v\d+)?\]", re.IGNORECASE),
     re.compile(r"(?:^|[\s._\-(])(\d{1,3})(?:v\d+)?(?=$|[\s._\-)\[])", re.IGNORECASE),
 )
@@ -36,6 +43,7 @@ IGNORED_NUMBERS = {264, 265, 480, 576, 720, 1080, 2160}
 
 
 def build_tv_archive_only_plan(work: Path, manifest: dict[str, Any], decisions: dict[str, Any]) -> dict[str, Any]:
+    output_root = artifact_output_root(work)
     discovery = manifest.get("discovery", {})
     videos = [
         item
@@ -89,7 +97,7 @@ def build_tv_archive_only_plan(work: Path, manifest: dict[str, Any], decisions: 
     package = None
     if zip_source and archive_root:
         archive_destination = Path(archive_root) / f"{title}.zip"
-        package_output = package_path(work, title)
+        package_output = package_path(output_root, title)
         final_zip.append({"source": str(package_output), "destination": str(archive_destination)})
         package = {
             "output": str(package_output),
@@ -515,6 +523,7 @@ def build_tv_plan(
     completed_steps: set[str] | None = None,
 ) -> dict[str, Any]:
     work = work.resolve()
+    output_root = artifact_output_root(work)
     title = str(decisions.get("title") or work.name).strip()
     discovery = manifest.get("discovery", {})
     completed_steps = completed_steps or set()
@@ -650,10 +659,42 @@ def build_tv_plan(
             subtitle_by_episode.setdefault((0, record["source_episode"]), []).append(subtitle)
 
     embedded_by_source: dict[Path, tuple[list[dict[str, Any]], list[str]]] = {}
+    mixed_embedded_by_source: dict[
+        Path, tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]
+    ] = {}
     groups_by_season: dict[int, list[str]] = {}
     if subtitles:
         for (season, _), episode_items in subtitle_by_episode.items():
             groups_by_season.setdefault(season, []).extend(_subtitle_group(item) for item in episode_items)
+        if decisions.get("retain_embedded_subtitles"):
+            if embedded_status not in {"COMPLETE", "METADATA_ONLY"}:
+                issues.append({"code": "EMBEDDED_ASS_REQUIRED", "detail": embedded_status})
+            else:
+                embedded_files = {
+                    Path(str(item.get("source") or "")).resolve(): item
+                    for item in discovery.get("embeddedSubtitles", {}).get("files", [])
+                    if isinstance(item, dict) and item.get("source")
+                }
+                for record in records:
+                    source = record["path"].resolve()
+                    file_item = embedded_files.get(source)
+                    if not file_item:
+                        continue
+                    track_items = [
+                        item for item in file_item.get("tracks", [])
+                        if isinstance(item, dict) and item.get("extracted")
+                    ]
+                    names, name_issues = embedded_track_names(
+                        [str(item.get("track", {}).get("name") or "").strip() for item in track_items],
+                        decisions,
+                    )
+                    issues.extend({**issue, "file": record["path"].name} for issue in name_issues)
+                    attachments = [
+                        item for item in file_item.get("attachments", [])
+                        if isinstance(item, dict) and item.get("path")
+                    ]
+                    mixed_embedded_by_source[source] = (track_items, names, attachments)
+                    groups_by_season.setdefault(record["season"], []).extend(names)
     elif embedded_status in {"COMPLETE", "METADATA_ONLY"}:
         for record in records:
             tracks = [track for track in record["inventory"].get("tracks", []) if is_ass_track(track)]
@@ -678,7 +719,7 @@ def build_tv_plan(
         target_number = record["target_episode"]
         record_release_group = _release_group_for_season(season, season_groups, release_group)
         base_name = f"{title}.S{season:02d}E{target_number:02d}"
-        output = tv_video_path(work, title, season, target_number)
+        output = tv_video_path(output_root, title, season, target_number)
         sources = [(source, record["inventory"])]
         paired = mka_by_key.get((relative_media_key(source.parent, work).casefold(), source.stem.casefold()))
         if paired:
@@ -822,13 +863,14 @@ def build_tv_plan(
             subtitle_by_episode.get((season, source_number), []),
             key=lambda item: season_rank.get(_normalized_group(_subtitle_group(item)), len(season_rank)),
         )
-        for subtitle_index, subtitle in enumerate(episode_subtitles):
+        planned_subtitle_inputs: list[dict[str, Any]] = []
+        for subtitle in episode_subtitles:
             source_ass = Path(subtitle["file"]["path"])
             group = _subtitle_group(subtitle)
             # Keep the archive's stable TV layout even when source subtitles
             # are supplied directly under the task root instead of S1/.
             labeled_parent = Path(f"S{season}") / group
-            planned_ass = tv_subtitle_path(work, title, season, target_number, group)
+            planned_ass = tv_subtitle_path(output_root, title, season, target_number, group)
             subset_ass = source_ass.with_suffix(".assfonts" + source_ass.suffix)
             subtitle_groups.setdefault(group, []).append(str(source_ass))
             rename_jobs.append({"source": str(subset_ass), "target": str(planned_ass)})
@@ -836,13 +878,29 @@ def build_tv_plan(
                 "source": str(planned_ass),
                 "arcname": str((labeled_parent / f"{base_name}.ass").as_posix()),
             })
+            planned_subtitle_inputs.append({"path": str(planned_ass), "group": group})
+
+        mixed_tracks, mixed_names, mixed_attachments = mixed_embedded_by_source.get(
+            source.resolve(), ([], [], [])
+        )
+        planned_subtitle_inputs.extend(
+            {"path": str(item["extracted"]), "group": name, "passthrough": True}
+            for item, name in zip(mixed_tracks, mixed_names)
+        )
+        planned_subtitle_inputs.sort(
+            key=lambda item: season_rank.get(
+                _normalized_group(str(item.get("group") or "")), len(season_rank)
+            )
+        )
+        for subtitle_index, subtitle in enumerate(planned_subtitle_inputs):
+            group = str(subtitle["group"])
             arguments.extend([
                 "--no-video", "--no-audio", "--no-chapters",
                 "--language", "0:chi",
                 "--track-name", f"0:{group}",
                 "--default-track-flag", f"0:{'yes' if subtitle_index == 0 else 'no'}",
                 "--forced-display-flag", "0:no",
-                str(planned_ass),
+                str(subtitle["path"]),
             ])
             subtitle_input_index = len(sources) + subtitle_index
             track_order.append(f"{subtitle_input_index}:0")
@@ -853,6 +911,12 @@ def build_tv_plan(
                 "default": subtitle_index == 0,
                 "forced": False,
             })
+        for attachment in mixed_attachments:
+            attachment_name = str(attachment.get("name") or Path(attachment["path"]).name)
+            arguments.extend([
+                "--attachment-name", attachment_name,
+                "--attach-file", str(attachment["path"]),
+            ])
         if track_order:
             arguments.extend(["--track-order", ",".join(track_order)])
         expected_chapters = bool(record["inventory"].get("chapters", {}).get("present")) if decisions.get("keep_chapters", True) else False
@@ -861,7 +925,16 @@ def build_tv_plan(
             for value in record["inventory"].get("mkvInventory", {}).get("attachments", [])
             if value.get("name")
         ] if embedded_tracks else []
-        expected_attachments = [str(value) for value in decisions.get("expected_attachments", embedded_attachments)]
+        mixed_attachment_names = [
+            str(item.get("name") or Path(item["path"]).name)
+            for item in mixed_attachments
+        ]
+        expected_attachments = [
+            str(value)
+            for value in decisions.get(
+                "expected_attachments", mixed_attachment_names or embedded_attachments
+            )
+        ]
         remux_jobs.append({
             "source": str(source),
             "output": str(output),
@@ -883,7 +956,7 @@ def build_tv_plan(
     config = json.loads(read_text(Path(manifest["configPath"])))
     archive_root_value = str(config.get("paths", {}).get("subtitleArchiveRoot") or "").strip()
     archive_root = Path(archive_root_value) if archive_root_value else None
-    package_output = package_path(work, title)
+    package_output = package_path(output_root, title)
     final_zip = []
     package_plan = None
     if package_entries and archive_root is not None:

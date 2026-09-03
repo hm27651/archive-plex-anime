@@ -7,11 +7,12 @@ import argparse
 import copy
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 SCRIPT_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,7 @@ from archive_rules import (
     is_under,
     resolve_path as expand_path,
     route_branch,
+    task_output_root,
     temporary_path,
 )
 from capabilities import CAPABILITY_ORDER
@@ -211,8 +213,20 @@ def inspect_embedded_subtitles(
     )
 
 
-def validate_mkv_output(path: Path, mkvmerge: str, job: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-    return remux_validate_mkv_output(path, mkvmerge, job, inspector=inspect_video)
+def validate_mkv_output(
+    path: Path,
+    mkvmerge: str,
+    job: dict[str, Any],
+    *,
+    allow_preserved_chapter_repair: bool = False,
+) -> tuple[dict[str, Any], list[str]]:
+    return remux_validate_mkv_output(
+        path,
+        mkvmerge,
+        job,
+        inspector=inspect_video,
+        allow_preserved_chapter_repair=allow_preserved_chapter_repair,
+    )
 
 
 def exact_track_id_map(path: Path, media_inventory: dict[str, Any], mkvmerge: str, selected_keys: list[str] | None = None) -> dict[str, int]:
@@ -268,10 +282,60 @@ def read_tracker_state(config: dict[str, Any]) -> dict[str, Any]:
 
 def inspect_library_existing(config: dict[str, Any], title: str, branch: str, preferred_library: str) -> dict[str, Any]:
     tracker_state = read_tracker_state(config)
+    manual = config.get("hubTask", {}).get("libraryTarget") if isinstance(config.get("hubTask"), dict) else None
+    if isinstance(manual, dict):
+        library = str(manual.get("library") or "")
+        relative_text = str(manual.get("relative_path") or "").strip().replace("\\", "/")
+        relative = PurePosixPath(relative_text)
+        root = configured_library_root(config, library)
+        if (
+            library not in library_target.LIBRARIES.get(branch, ())
+            or root is None
+            or not relative_text
+            or relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            resolution = {
+                "status": "NEEDS_USER",
+                "code": "MANUAL_REPLACEMENT_TARGET_INVALID",
+                "branch": branch,
+                "target": {"library": library, "relativePath": relative_text},
+            }
+            return {"trackerState": tracker_state, "trackerMatches": [], "nasMatches": [], "resolution": resolution}
+        selected = (root / Path(*relative.parts)).resolve(strict=False)
+        if not is_under(selected, root) or not selected.is_dir():
+            resolution = {
+                "status": "NEEDS_USER",
+                "code": "MANUAL_REPLACEMENT_TARGET_MISSING",
+                "branch": branch,
+                "target": {"library": library, "relativePath": relative.as_posix()},
+            }
+            return {"trackerState": tracker_state, "trackerMatches": [], "nasMatches": [], "resolution": resolution}
+        candidate = library_target.nas_directory_candidate(library, selected, branch, title=title)
+        webrip = branch == "tv" and bool(
+            candidate.get("webrip")
+            or any(item.get("webrip") for item in candidate.get("seasons", []))
+        )
+        resolution = {
+            "status": "OK",
+            "mode": "tv-webrip-to-bdrip" if webrip else "replace",
+            "library": library,
+            "tracker": None,
+            "nas": candidate,
+            "manual": True,
+        }
+        return {"trackerState": tracker_state, "trackerMatches": [], "nasMatches": [candidate], "resolution": resolution}
     entries = library_target.tracker_candidates(tracker_state.get("entries", []), title, branch)
     roots = {library: configured_library_root(config, library) for library in library_target.LIBRARIES[branch]}
     nas = library_target.nas_candidates({key: value for key, value in roots.items() if value is not None}, title, branch)
-    resolution = library_target.resolve_target(branch, entries, nas, preferred_library)
+    tracker_config = config.get("tracker", {}) if isinstance(config.get("tracker"), dict) else {}
+    resolution = library_target.resolve_target(
+        branch,
+        entries,
+        nas,
+        preferred_library,
+        allow_nas_only=bool(tracker_config.get("allowNasOnlyTarget", False)),
+    )
     return {"trackerState": tracker_state, "trackerMatches": entries, "nasMatches": nas, "resolution": resolution}
 
 
@@ -541,19 +605,77 @@ def command_remux(args: argparse.Namespace) -> dict[str, Any]:
     manifest = load_manifest(path)
     require_execution(args, manifest)
     config = require_backend_config(Path(manifest["configPath"]))
+    work = expand_path(manifest["workPath"])
+    task_state = load_task_state(work) or {}
+    decisions = task_state.get("decisions", {}) if isinstance(task_state.get("decisions"), dict) else {}
+    allow_preserved_chapter_repair = (
+        task_state.get("branch") == "tv" and decisions.get("keep_chapters", True) is not False
+    )
+
+    def validate_remux_output(
+        output: Path,
+        mkvmerge: str,
+        job: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[str]]:
+        expected_chapters = job.get("expectedChapters")
+        inventory, warnings = validate_mkv_output(
+            output,
+            mkvmerge,
+            job,
+            allow_preserved_chapter_repair=allow_preserved_chapter_repair,
+        )
+        if expected_chapters is False and job.get("expectedChapters") is True:
+            output_key = os.path.normcase(str(output))
+            for final_job in manifest.get("plan", {}).get("final", {}).get("video", []):
+                if os.path.normcase(str(expand_path(final_job.get("source", "")))) == output_key:
+                    final_job["expectedChapters"] = True
+        return inventory, warnings
 
     def record_warning(code: str, message: str) -> None:
         add_event(manifest, "WARNING", code, message, "remux")
+
+    progress_path: Path | None = None
+    if getattr(args, "progress_file", None):
+        progress_path = expand_path(args.progress_file)
+        if not is_under(progress_path, task_output_root(work)):
+            raise WorkflowError("REMUX_PROGRESS_PATH_INVALID", "Remux progress file must stay inside the task output directory")
+        progress_path.unlink(missing_ok=True)
+
+    def record_progress(progress: dict[str, Any]) -> None:
+        if progress_path is not None:
+            json_write_atomic(progress_path, progress)
+
+    stop_request = task_output_root(work) / "control" / "stop-after-current"
+
+    def should_stop_after_current() -> bool | dict[str, Any]:
+        if not stop_request.is_file():
+            return False
+        details: dict[str, Any] = {}
+        try:
+            value = json.loads(stop_request.read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                invalidated = value.get("invalidated_files")
+                if isinstance(invalidated, list) and all(isinstance(item, str) for item in invalidated):
+                    details["invalidated_files"] = invalidated
+                reason = str(value.get("reason") or "").strip()
+                if reason:
+                    details["reason"] = reason
+        except (OSError, json.JSONDecodeError):
+            pass
+        stop_request.unlink(missing_ok=True)
+        return details or True
 
     result = execute_remux(
         manifest,
         tool_path(config, "mkvmerge"),
         runner=run_command,
         track_mapper=exact_track_id_map,
-        validator=validate_mkv_output,
+        validator=validate_remux_output,
         direct_output=getattr(args, "direct_output", False),
         defer_output_validation=getattr(args, "defer_output_validation", False),
         on_warning=record_warning,
+        on_progress=record_progress,
+        should_stop_after_current=should_stop_after_current,
     )
     if result["status"] == "SKIPPED":
         set_stage(manifest, "remux", "SKIPPED", reason=result["reason"])
@@ -595,12 +717,48 @@ def command_verify_local(args: argparse.Namespace) -> dict[str, Any]:
     mkvmerge = tool_path(config, "mkvmerge")
     outputs = []
     warnings: list[str] = []
+    work = expand_path(manifest["workPath"])
+    task_state = load_task_state(work) or {}
+    decisions = task_state.get("decisions", {}) if isinstance(task_state.get("decisions"), dict) else {}
+    allow_preserved_chapter_repair = (
+        task_state.get("branch") == "tv" and decisions.get("keep_chapters", True) is not False
+    )
     jobs = manifest.get("plan", {}).get("remuxJobs", [])
     if not jobs:
         jobs = [job for job in manifest.get("plan", {}).get("final", {}).get("video", []) if job.get("source")]
+    remux_results = {
+        os.path.normcase(str(expand_path(item["output"]["path"]))): item
+        for item in manifest.get("remuxResults", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("output"), dict)
+        and item["output"].get("path")
+    }
     for job in jobs:
         output = expand_path(job.get("output") or job["source"])
-        inventory, item_warnings = validate_mkv_output(output, mkvmerge, job)
+        expected_chapters = job.get("expectedChapters")
+        cached = remux_results.get(os.path.normcase(str(output)))
+        cached_inventory = cached.get("inventory") if isinstance(cached, dict) else None
+        cached_signature = cached.get("output") if isinstance(cached, dict) else None
+        if (
+            isinstance(cached_inventory, dict)
+            and cached_inventory.get("status") != "DEFERRED"
+            and isinstance(cached_signature, dict)
+            and signature_matches(cached_signature)
+        ):
+            inventory = cached_inventory
+            item_warnings = list(cached.get("warnings") or [])
+        else:
+            inventory, item_warnings = validate_mkv_output(
+                output,
+                mkvmerge,
+                job,
+                allow_preserved_chapter_repair=allow_preserved_chapter_repair,
+            )
+        if expected_chapters is False and job.get("expectedChapters") is True:
+            output_key = os.path.normcase(str(output))
+            for final_job in manifest.get("plan", {}).get("final", {}).get("video", []):
+                if os.path.normcase(str(expand_path(final_job.get("source", "")))) == output_key:
+                    final_job["expectedChapters"] = True
         warnings.extend(item_warnings)
         outputs.append(inventory)
     package = manifest.get("plan", {}).get("package")
@@ -616,12 +774,147 @@ def command_verify_local(args: argparse.Namespace) -> dict[str, Any]:
             raise WorkflowError("DIRECT_ZIP_COUNT", "Direct archive supports exactly one subtitle ZIP")
         zip_result = verify_zip(expand_path(direct_jobs[0]["source"]))
     for warning in warnings:
-        add_event(manifest, "WARNING", "TRACK_EXPECTATION_UNAVAILABLE", warning, "verify-local")
+        code = (
+            "CHAPTER_EXPECTATION_REPAIRED"
+            if warning.startswith("legacy chapter expectation repaired")
+            else "TRACK_EXPECTATION_UNAVAILABLE"
+        )
+        add_event(manifest, "WARNING", code, warning, "verify-local")
     result = {"status": "COMPLETE", "videos": outputs, "zip": zip_result, "warnings": warnings, "events": manifest.get("events", [])}
     manifest["localVerification"] = result
     set_stage(manifest, "verify-local", "COMPLETE", videoCount=len(outputs), zip=bool(zip_result))
     save_manifest(path, manifest)
     return result
+
+
+TV_EPISODE_TARGET_RE = re.compile(r"\.S(?P<season>\d{2})E(?P<episode>\d{2,3})(?:\D|$)", re.IGNORECASE)
+
+
+def _tv_target_key(value: str | Path) -> str:
+    match = TV_EPISODE_TARGET_RE.search(Path(str(value)).name)
+    if not match:
+        return ""
+    return f"S{int(match.group('season')):02d}E{int(match.group('episode')):02d}"
+
+
+def _next_available_target(path: Path) -> Path:
+    if not path.exists():
+        return path
+    number = 1
+    while True:
+        candidate = path.with_name(f"{path.stem} ({number}){path.suffix}")
+        if not candidate.exists():
+            return candidate
+        number += 1
+
+
+def _target_option(operation: str, destination: Path, label: str) -> dict[str, str]:
+    resolved = destination.resolve(strict=False)
+    option_id = canonical_metadata_digest(
+        {"operation": operation, "destination": str(resolved)}
+    )[:16]
+    return {
+        "id": option_id,
+        "operation": operation,
+        "destination": str(resolved),
+        "label": label,
+    }
+
+
+def _tv_replacement_target_plan(
+    jobs: list[dict[str, Any]],
+    target_directory: Path,
+    resolutions: dict[str, str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
+    """Classify each TV output as create, replace, or an explicit user conflict."""
+
+    target_directory = target_directory.resolve(strict=False)
+    resolutions = resolutions or {}
+    existing_by_episode: dict[str, list[Path]] = {}
+    if target_directory.is_dir():
+        for path in sorted(target_directory.rglob("*"), key=lambda item: str(item).casefold()):
+            if not path.is_file() or path.suffix.casefold() not in {".mkv", ".mp4"}:
+                continue
+            key = _tv_target_key(path)
+            if key:
+                existing_by_episode.setdefault(key, []).append(path.resolve())
+
+    conflicts: list[dict[str, Any]] = []
+    summary = {"create": 0, "replace": 0, "conflict": 0}
+    planned: list[dict[str, Any]] = []
+    for original in jobs:
+        job = copy.deepcopy(original)
+        relative = PurePosixPath(str(job.get("relativePath") or "").replace("\\", "/"))
+        key = _tv_target_key(relative.name) or _tv_target_key(job.get("source", ""))
+        if not key or len(relative.parts) < 2:
+            job["operation"] = "conflict"
+            conflict = {
+                "target_key": key or str(job.get("relativePath") or job.get("source") or "unknown"),
+                "reason": "目标文件无法识别季集编号",
+                "source": str(job.get("source") or ""),
+                "proposed_destination": "",
+                "options": [],
+            }
+            job["targetKey"] = conflict["target_key"]
+            conflicts.append(conflict)
+            summary["conflict"] += 1
+            planned.append(job)
+            continue
+
+        # The confirmed media directory is authoritative.  Drop the generated
+        # title directory from title/Sx/file.mkv and keep the season/file part.
+        proposed = (target_directory / Path(*relative.parts[1:])).resolve(strict=False)
+        matches = existing_by_episode.get(key, [])
+        job["targetKey"] = key
+        if len(matches) == 1:
+            job["destination"] = str(matches[0])
+            job["operation"] = "replace"
+            summary["replace"] += 1
+            planned.append(job)
+            continue
+        if not matches and not proposed.exists():
+            job["destination"] = str(proposed)
+            job["operation"] = "create"
+            summary["create"] += 1
+            planned.append(job)
+            continue
+
+        replace_candidates = matches or ([proposed] if proposed.is_file() else [])
+        options = [
+            _target_option("replace", candidate, f"替换现有文件：{candidate.name}")
+            for candidate in replace_candidates
+        ]
+        create_target = _next_available_target(proposed)
+        options.append(
+            _target_option("create", create_target, f"保留旧文件，新增为：{create_target.name}")
+        )
+        selected_id = str(resolutions.get(key) or "")
+        selected = next((item for item in options if item["id"] == selected_id), None)
+        if selected is not None:
+            destination = Path(selected["destination"])
+            if selected["operation"] == "replace" and not destination.is_file():
+                selected = None
+            elif selected["operation"] == "create" and destination.exists():
+                selected = None
+        if selected is not None:
+            job["destination"] = selected["destination"]
+            job["operation"] = selected["operation"]
+            summary[selected["operation"]] += 1
+        else:
+            job["destination"] = str(proposed)
+            job["operation"] = "conflict"
+            conflicts.append(
+                {
+                    "target_key": key,
+                    "reason": "找到多个同季同集文件" if len(matches) > 1 else "建议文件名已被占用",
+                    "source": str(job.get("source") or ""),
+                    "proposed_destination": str(proposed),
+                    "options": options,
+                }
+            )
+            summary["conflict"] += 1
+        planned.append(job)
+    return planned, conflicts, summary
 
 
 def command_prepare_final(args: argparse.Namespace) -> dict[str, Any]:
@@ -677,25 +970,64 @@ def command_prepare_final(args: argparse.Namespace) -> dict[str, Any]:
     root = configured_library_root(config, resolved_library)
     if root is None and final.get("video"):
         raise WorkflowError("FINAL_LIBRARY_OFFLINE", f"Resolved library is unavailable: {resolved_library}")
+    task_state = load_task_state(work) or {}
+    target_actions = task_state.get("final_target_actions")
+    if not isinstance(target_actions, dict):
+        target_actions = {}
+    target_nas = target_resolution.get("nas") if isinstance(target_resolution, dict) else None
+    target_directory = (
+        expand_path(target_nas["path"])
+        if isinstance(target_nas, dict) and target_nas.get("path")
+        else None
+    )
+    if (
+        manifest.get("route", {}).get("branch") == "anime"
+        and target_directory is not None
+        and final.get("video")
+        and final.get("mode") != "tv-webrip-to-bdrip"
+    ):
+        planned_video, target_conflicts, target_summary = _tv_replacement_target_plan(
+            list(final.get("video", [])), target_directory, target_actions
+        )
+        final["video"] = planned_video
+        final["targetConflicts"] = target_conflicts
+        final["targetSummary"] = target_summary
+        final["targetRoot"] = str(target_directory.resolve(strict=False))
+    else:
+        final["targetConflicts"] = []
+        final["targetSummary"] = {"create": 0, "replace": 0, "conflict": 0}
+
     for job in final.get("video", []):
         source = expand_path(job["source"])
         source_signature = verified_videos.get(os.path.normcase(str(source)))
         if not source_signature:
             raise WorkflowError("FINAL_SOURCE_VERIFICATION_MISSING", f"Reviewed source signature is missing: {source}")
         job["sourceSignature"] = source_signature
-        if job.get("relativePath") and root is not None:
+        if not job.get("destination") and job.get("relativePath") and root is not None:
             job["destination"] = str((root / str(job["relativePath"])).resolve(strict=False))
         destination = expand_path(job["destination"])
         require_final_target_outside_work(destination, work)
         mode = str(job.get("operation") or ("replace" if final.get("mode") in {"replace", "tv-webrip-to-bdrip"} else "create"))
-        if final.get("mode") == "tv-webrip-to-bdrip":
+        if final.get("mode") == "tv-webrip-to-bdrip" and mode != "conflict":
             mode = "upsert"
         exists = destination.exists()
+        if mode == "conflict":
+            job["operation"] = mode
+            continue
         if mode == "create" and exists:
             raise WorkflowError("FINAL_CREATE_TARGET_EXISTS", f"Confirmed create target now exists: {destination}")
         if mode == "replace" and not exists and not directory_candidate:
             raise WorkflowError("FINAL_REPLACE_TARGET_MISSING", f"Confirmed replacement target is missing: {destination}")
         job["operation"] = mode
+    if not final.get("targetConflicts") and not any(final.get("targetSummary", {}).values()):
+        target_summary = {"create": 0, "replace": 0, "conflict": 0}
+        for job in final.get("video", []):
+            operation = str(job.get("operation") or "")
+            if operation == "upsert":
+                operation = "replace" if expand_path(job["destination"]).exists() else "create"
+            if operation in target_summary:
+                target_summary[operation] += 1
+        final["targetSummary"] = target_summary
     for job in final.get("zip", []):
         source = expand_path(job["source"])
         if not isinstance(verified_zip, dict) or os.path.normcase(str(expand_path(verified_zip.get("path", "")))) != os.path.normcase(str(source)):
@@ -750,6 +1082,8 @@ def command_prepare_final(args: argparse.Namespace) -> dict[str, Any]:
         "batchDigest": final["batchDigest"],
         "library": resolved_library,
         "mode": final.get("mode"),
+        "targetSummary": final.get("targetSummary", {}),
+        "targetConflicts": final.get("targetConflicts", []),
         "final": final,
     }
 
@@ -905,6 +1239,8 @@ def build_parser() -> argparse.ArgumentParser:
         add_mutation_flags(child)
         if name in {"remux", "package"}:
             child.add_argument("--defer-output-validation", action="store_true")
+        if name == "remux":
+            child.add_argument("--progress-file")
         child.set_defaults(handler=handler)
 
     verify = subparsers.add_parser("verify-local")
@@ -936,12 +1272,17 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if normalize_status(str(result.get("status") or "OK")) not in {"FAILED", "NEEDS_USER"} else 2
     except WorkflowError as exc:
+        payload = {
+            "status": normalize_status(exc.category),
+            "code": exc.code,
+            "error": str(exc),
+        }
+        if exc.details:
+            payload["details"] = exc.details
+        if exc.retryable:
+            payload["retryable"] = True
         print(
-            json.dumps(
-                {"status": normalize_status(exc.category), "code": exc.code, "error": str(exc)},
-                ensure_ascii=False,
-                indent=2,
-            ),
+            json.dumps(payload, ensure_ascii=False, indent=2),
             file=sys.stderr,
         )
         return 2

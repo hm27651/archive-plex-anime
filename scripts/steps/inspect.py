@@ -47,7 +47,7 @@ def run(context):
         extra.extend(["--title", str(decisions["title"])])
     if "metadata" in state.get("resolved_capabilities", []) and isinstance(decisions.get("metadata"), dict):
         extra.extend(["--metadata-json", json.dumps(decisions["metadata"], ensure_ascii=False, separators=(",", ":"))])
-    if state.get("branch") == "movie" and decisions.get("retain_embedded_subtitles"):
+    if state.get("branch") in {"tv", "movie"} and decisions.get("retain_embedded_subtitles"):
         extra.append("--retain-embedded-subtitles")
     for requested in state.get("requested_steps") or []:
         extra.extend(["--requested-step", str(requested)])

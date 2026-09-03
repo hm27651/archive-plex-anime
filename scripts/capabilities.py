@@ -84,6 +84,12 @@ PRESET_CAPABILITIES = {
     # --steps values, or requested_capabilities, are added by the caller.
     "local-only": ("inspect",),
 }
+PRESET_PRESENTATION = {
+    "complete-archive": {"label": "完整洗版", "description": "处理字幕、封装、归档和最终写入。"},
+    "replacement": {"label": "洗版替换", "description": "生成并校验新的媒体库版本。"},
+    "archive-only": {"label": "原样归档", "description": "保留现有封装，只准备正式归档产物。"},
+    "local-only": {"label": "仅生成本地产物", "description": "只在任务目录生成和校验产物，不写入媒体库。"},
+}
 
 LOCAL_ONLY_CAPABILITIES = frozenset(
     {"inspect", "metadata", "movie-audio", "subtitle", "remux", "subtitle-package"}
@@ -151,6 +157,7 @@ def capability_catalog(entrypoint: str = "cli", branch: str | None = None) -> di
         "presets": [
             {
                 "id": preset,
+                **PRESET_PRESENTATION[preset],
                 "capabilities": [name for name in PRESET_CAPABILITIES[preset] if name in visible],
             }
             for preset in PRESETS

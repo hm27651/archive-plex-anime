@@ -370,6 +370,24 @@ def _tvdb_episode_summary(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def _single_tmdb_series_id(bindings: dict[str, Any], selected_id: int) -> int:
+    """Reject legacy per-season series mixing at the Archive trust boundary."""
+
+    series_ids = {selected_id}
+    for binding in bindings.values():
+        if not isinstance(binding, dict):
+            raise ValueError("invalid season binding")
+        candidate = _safe_int(binding.get("tmdb_id"))
+        if candidate is not None:
+            series_ids.add(candidate)
+        provider = str(binding.get("source") or "tmdb").casefold()
+        if provider != "tmdb":
+            raise ValueError("mixed metadata providers")
+    if len(series_ids) != 1:
+        raise ValueError("multiple TMDB series")
+    return selected_id
+
+
 def _path_season_episode(path: Path, work: Path) -> tuple[int, int] | None:
     try:
         relative = path.relative_to(work)
@@ -422,6 +440,7 @@ def inspect_metadata(
     files: list[Path],
     supplied: Any,
     *,
+    local_season_numbers: list[int] | None = None,
     http_factory: Any = JsonHttpClient,
 ) -> dict[str, Any]:
     """Return normalized suggestions only; raw responses and credentials stay private."""
@@ -514,13 +533,60 @@ def inspect_metadata(
     }
 
     if media_type == "tv":
+        requested_seasons = (
+            sorted(set(local_season_numbers))
+            if local_season_numbers
+            else local_seasons(work, files)
+        )
         if options["episodeOrder"] == "tmdb":
             episodes = []
             bindings = options["seasonBindings"]
             try:
-                for local_season in local_seasons(work, files):
+                _single_tmdb_series_id(bindings, selected["id"])
+            except ValueError:
+                base["status"] = "NEEDS_USER"
+                base["issues"].append(
+                    {
+                        "code": "REMOTE_SERIES_SPLIT_REQUIRED",
+                        "provider": "tmdb",
+                        "detail": "全部季度与 S00 必须属于同一个 TMDB 系列；否则请整体切换 TVDB 或拆分作品任务",
+                    }
+                )
+                return base
+            available_seasons = {
+                int(item["season"])
+                for item in selected.get("seasons", [])
+                if int(item.get("episodeCount") or 0) > 0
+            }
+            missing_tmdb = sorted(set(requested_seasons) - available_seasons)
+            tvdb_fallback_id = _safe_int(options["tvdbId"]) or selected.get("tvdbId")
+            if missing_tmdb and tvdb_fallback_id:
+                options["episodeOrder"] = "tvdb-aired"
+                base["episodeOrder"] = "tvdb-aired"
+                base["warnings"].append(
+                    {
+                        "code": "TMDB_SEASON_COVERAGE_INCOMPLETE",
+                        "missingSeasons": missing_tmdb,
+                        "fallback": "tvdb-aired",
+                    }
+                )
+                base["suggestedDecisions"]["metadata"]["episode_order"] = "tvdb-aired"
+                base["suggestedDecisions"]["metadata"]["remote_source"] = "tvdb"
+            elif missing_tmdb:
+                base["status"] = "NEEDS_USER"
+                base["issues"].append(
+                    {
+                        "code": "REMOTE_SERIES_SPLIT_REQUIRED",
+                        "provider": "tmdb",
+                        "missingSeasons": missing_tmdb,
+                        "detail": "TMDB 无法覆盖全部季度且没有可用 TVDB 系列，请补充 TVDB 或拆分作品任务",
+                    }
+                )
+                return base
+            try:
+                for local_season in requested_seasons if not missing_tmdb else []:
                     binding = bindings.get(f"S{local_season}") or bindings.get(str(local_season)) or {}
-                    series_id = _safe_int(binding.get("tmdb_id")) or selected["id"]
+                    series_id = selected["id"]
                     remote_season = _safe_int(binding.get("tmdb_season"))
                     remote_season = local_season if remote_season is None else remote_season
                     season_value = tmdb.season(series_id, remote_season, language=options["language"])
@@ -558,6 +624,20 @@ def inspect_metadata(
             if tvdb_required:
                 order = options["episodeOrder"].removeprefix("tvdb-")
                 base["episodes"] = _tvdb_episode_summary(tvdb.episodes(tvdb_id, order))
+                requested = set(requested_seasons if media_type == "tv" else [])
+                covered = {int(item["season"]) for item in base["episodes"]}
+                missing = sorted(requested - covered)
+                if missing:
+                    base["status"] = "NEEDS_USER"
+                    base["issues"].append(
+                        {
+                            "code": "REMOTE_SERIES_SPLIT_REQUIRED",
+                            "provider": "tvdb",
+                            "missingSeasons": missing,
+                            "detail": "TVDB 也无法用单一系列覆盖全部季度，请拆分为多个作品任务",
+                        }
+                    )
+                    return base
         except MetadataHttpError as exc:
             payload = {"code": exc.code, "provider": "tvdb", "detail": str(exc)}
             if tvdb_required:

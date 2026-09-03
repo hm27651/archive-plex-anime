@@ -32,6 +32,7 @@ from steps.package import run as package_run  # noqa: E402
 from steps.remux import run as remux_run  # noqa: E402
 from steps.review import run as review_run  # noqa: E402
 from steps.inspect import public_metadata_summary  # noqa: E402
+from tv_plan import build_tv_plan  # noqa: E402
 
 
 def init_args(root: Path, *, branch: str = "tv", task: str = "complete-archive") -> Namespace:
@@ -98,6 +99,89 @@ class LightweightWorkflowTests(unittest.TestCase):
             extra = backend.call_args.args[2]
             payload = extra[extra.index("--metadata-json") + 1]
             self.assertEqual("中文作品", json.loads(payload)["query"])
+
+    def test_inspect_backend_forwards_retained_embedded_subtitles_for_tv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = {
+                "task": "replacement",
+                "branch": "tv",
+                "requested_steps": None,
+                "resolved_capabilities": ["inspect", "subtitle", "remux"],
+                "decisions": {"retain_embedded_subtitles": True},
+            }
+            with mock.patch.object(workflow, "backend_command", return_value={"status": "COMPLETE"}) as backend:
+                workflow.inspect_backend(root, state)
+            self.assertIn("--retain-embedded-subtitles", backend.call_args.args[2])
+
+    def test_tv_can_mux_external_and_retained_embedded_subtitles_together(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            season = root / "S1"
+            group_dir = season / "SC 华盟"
+            group_dir.mkdir(parents=True)
+            source = season / "Source [01].mkv"
+            external = group_dir / "Source [01].ass"
+            extracted = root / ".archive-temp" / "embedded" / "Source [01].ass"
+            font = root / ".archive-temp" / "embedded" / "font.ttf"
+            config = root / "config.json"
+            config.write_text(
+                json.dumps({"paths": {"subtitleArchiveRoot": str(root / "subtitle-archive")}}),
+                encoding="utf-8",
+            )
+            video = {
+                "status": "OK",
+                "file": {"path": str(source), "size": 1, "mtimeUtcNs": 1},
+                "tracks": [
+                    {"type": "video", "trackKey": "v1", "title": "", "language": "jpn"},
+                    {"type": "audio", "trackKey": "a1", "title": "", "language": "jpn", "channels": 2},
+                ],
+                "chapters": {"present": True},
+            }
+            manifest = {
+                "configPath": str(config),
+                "taskMode": "replacement",
+                "discovery": {
+                    "videos": [video],
+                    "subtitles": [{"file": {"path": str(external)}, "group": "S1/SC 华盟"}],
+                    "embeddedSubtitles": {
+                        "status": "COMPLETE",
+                        "files": [{
+                            "source": str(source),
+                            "tracks": [{
+                                "track": {"name": "SC 冷番补完"},
+                                "extracted": str(extracted),
+                            }],
+                            "attachments": [{"name": "SourceFont.ttf", "path": str(font)}],
+                        }],
+                    },
+                },
+            }
+            generated = build_tv_plan(
+                root,
+                manifest,
+                {
+                    "title": "作品",
+                    "release_group": "冷番补完",
+                    "retain_embedded_subtitles": True,
+                    "subtitle_order_by_season": {"S1": ["SC 冷番补完", "SC 华盟"]},
+                },
+                {},
+            )
+
+            self.assertEqual([], generated["issues"])
+            job = generated["plan"]["remuxJobs"][0]
+            self.assertEqual(
+                [("SC 冷番补完", True), ("SC 华盟", False)],
+                [
+                    (item["name"], item["default"])
+                    for item in job["expectedTracks"]
+                    if item["type"] == "subtitles"
+                ],
+            )
+            self.assertIn(str(extracted), job["arguments"])
+            self.assertIn(str(font), job["arguments"])
+            self.assertEqual(["SourceFont.ttf"], job["expectedAttachments"])
 
     def test_inspect_backend_does_not_forward_unselected_metadata(self):
         with tempfile.TemporaryDirectory() as directory:

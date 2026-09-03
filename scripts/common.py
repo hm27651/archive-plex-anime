@@ -19,9 +19,20 @@ from archive_rules import (
 
 
 class WorkflowIssue(RuntimeError):
-    def __init__(self, status: str, message: str) -> None:
+    def __init__(
+        self,
+        status: str,
+        message: str,
+        *,
+        code: str = "",
+        details: dict[str, Any] | None = None,
+        retryable: bool = False,
+    ) -> None:
         super().__init__(message)
         self.status = normalize_status(status)
+        self.code = code
+        self.details = details or {}
+        self.retryable = retryable
 
 
 def configure_utf8_stdio() -> None:
@@ -193,7 +204,14 @@ def backend_command(
             status = "FAILED"
         if allow_needs_user and status == "NEEDS_USER":
             return payload
-        raise WorkflowIssue(status, str(payload.get("error") or raw or f"backend step failed: {command}"))
+        details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+        raise WorkflowIssue(
+            status,
+            str(payload.get("error") or raw or f"backend step failed: {command}"),
+            code=str(payload.get("code") or ""),
+            details=details,
+            retryable=bool(payload.get("retryable", False)),
+        )
     try:
         return json.loads(completed["stdout"])
     except json.JSONDecodeError:

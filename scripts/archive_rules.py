@@ -33,12 +33,24 @@ def state_path(work: Path) -> Path:
     return work / STATE_NAME
 
 
+def task_output_root(work: Path) -> Path:
+    configured = os.environ.get("ARCHIVE_TASK_OUTPUT_ROOT", "").strip()
+    return resolve_path(configured) if configured else work / TEMP_DIR_NAME
+
+
+def artifact_output_root(work: Path) -> Path:
+    """Return the visible local-artifact root selected by the current task."""
+
+    configured = os.environ.get("ARCHIVE_TASK_OUTPUT_ROOT", "").strip()
+    return resolve_path(configured) if configured else work
+
+
 def backend_cache_path(work: Path) -> Path:
-    return work / TEMP_DIR_NAME / BACKEND_CACHE_NAME
+    return task_output_root(work) / BACKEND_CACHE_NAME
 
 
 def temporary_path(work: Path, category: str, name: str | None = None) -> Path:
-    root = work / TEMP_DIR_NAME / category
+    root = task_output_root(work) / category
     return root / name if name else root
 
 
@@ -206,9 +218,10 @@ def validate_plan(work: Path, branch: str, task: str, plan: dict[str, Any]) -> l
     remux_targets: set[str] = set()
     zip_targets: set[str] = set()
     final_targets: set[str] = set()
+    output_root = artifact_output_root(work)
 
     for job in plan.get("renameJobs", []):
-        relative, issue = _validate_local_target(work, job.get("target", ""), allow_depth={3} if branch == "tv" else {1})
+        relative, issue = _validate_local_target(output_root, job.get("target", ""), allow_depth={3} if branch == "tv" else {1})
         if issue:
             issues.append(issue)
             continue
@@ -224,11 +237,11 @@ def validate_plan(work: Path, branch: str, task: str, plan: dict[str, Any]) -> l
         if not job.get("arguments") or not job.get("expectedTracks"):
             issues.append({"code": "CONTRACT_REMUX_EXPECTATION_REQUIRED", "output": str(job.get("output") or "")})
         issues.extend(_expected_track_issues(job.get("expectedTracks"), job.get("output", "")))
-        relative, issue = _validate_local_target(work, job.get("output", ""), allow_depth={2} if branch == "tv" else {1})
+        relative, issue = _validate_local_target(output_root, job.get("output", ""), allow_depth={2} if branch == "tv" else {1})
         if issue:
             issues.append(issue)
             continue
-        target_key = os.path.normcase(str((work / relative).resolve(strict=False)))
+        target_key = os.path.normcase(str((output_root / relative).resolve(strict=False)))
         if target_key in remux_targets:
             issues.append(_target_issue("CONTRACT_REMUX_TARGET_DUPLICATE", relative))
         remux_targets.add(target_key)
@@ -242,7 +255,7 @@ def validate_plan(work: Path, branch: str, task: str, plan: dict[str, Any]) -> l
 
     package = plan.get("package")
     if package:
-        relative, issue = _validate_local_target(work, package.get("output", ""), allow_depth={1})
+        relative, issue = _validate_local_target(output_root, package.get("output", ""), allow_depth={1})
         if issue:
             issues.append(issue)
         elif relative.name.casefold() != f"{title}.zip".casefold():

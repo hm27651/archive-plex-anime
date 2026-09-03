@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from archive_rules import (
+    artifact_output_root,
     movie_stack_suffix,
     movie_subtitle_path,
     movie_video_path,
@@ -73,6 +74,7 @@ def _source_sets(items: list[dict[str, Any]], title: str, completed_steps: set[s
 
 
 def build_movie_archive_only_plan(work: Path, manifest: dict[str, Any], decisions: dict[str, Any]) -> dict[str, Any]:
+    output_root = artifact_output_root(work)
     discovery = manifest.get("discovery", {})
     videos = [
         item
@@ -118,7 +120,7 @@ def build_movie_archive_only_plan(work: Path, manifest: dict[str, Any], decision
     package = None
     if zip_source and archive_root:
         archive_destination = Path(archive_root) / f"{title}.zip"
-        package_output = package_path(work, title)
+        package_output = package_path(output_root, title)
         final_zip.append({"source": str(package_output), "destination": str(archive_destination)})
         package = {
             "output": str(package_output),
@@ -235,6 +237,7 @@ def _movie_audio_plan(work: Path, title: str, preflight: dict[str, Any], release
 
 def _build_remux_job(
     work: Path,
+    output_root: Path,
     title: str,
     source_entry: dict[str, Any],
     planned_subtitles: list[dict[str, Any]],
@@ -249,7 +252,7 @@ def _build_remux_job(
     source_inventory = source_entry["inventory"]
     movie_audio = bool(source_entry.get("movie_audio"))
     synthetic_audio = list(source_entry.get("synthetic_audio") or [])
-    output = movie_video_path(work, title, stack)
+    output = movie_video_path(output_root, title, stack)
     issues: list[dict[str, Any]] = []
     expected_tracks: list[dict[str, Any]] = [{
         "type": "video", "language": "jpn", "name": release_group, "default": True, "forced": False,
@@ -382,6 +385,7 @@ def build_movie_plan(
     completed_steps: set[str] | None = None,
 ) -> dict[str, Any]:
     work = work.resolve()
+    output_root = artifact_output_root(work)
     discovery = manifest.get("discovery", {})
     title = str(decisions.get("title") or work.name).strip()
     completed_steps = completed_steps or set()
@@ -531,7 +535,7 @@ def build_movie_plan(
     ):
         path = Path(item["file"]["path"])
         language, group, stack = metadata[str(path)]
-        target = movie_subtitle_path(work, title, language, group, stack)
+        target = movie_subtitle_path(output_root, title, language, group, stack)
         subset = path.with_suffix(".assfonts" + path.suffix)
         rename_jobs.append({"source": str(subset), "target": str(target)})
         subtitle_groups.setdefault(group, []).append(str(path))
@@ -604,6 +608,7 @@ def build_movie_plan(
     for source_entry in sorted(sources, key=lambda item: str(item.get("stack") or "")):
         job, final, remux_issues = _build_remux_job(
             work,
+            output_root,
             title,
             source_entry,
             planned_subtitles,
@@ -619,7 +624,7 @@ def build_movie_plan(
 
     config = json.loads(Path(manifest["configPath"]).read_text(encoding="utf-8"))
     archive_root = str(config.get("paths", {}).get("movieSubtitleArchiveRoot") or "").strip()
-    package_output = package_path(work, title)
+    package_output = package_path(output_root, title)
     final_zip = []
     package_plan = None
     if package_entries and archive_root:

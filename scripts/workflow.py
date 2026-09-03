@@ -36,6 +36,8 @@ METADATA_DECISION_KEYS = {
     "episode_order", "year", "season_bindings",
 }
 METADATA_BINDING_KEYS = {"tmdb_id", "tmdb_season"}
+LIBRARY_TARGET_DECISION_KEYS = {"storage_id", "library", "relative_path"}
+STAGING_DECISION_KEYS = {"relative_path"}
 BACKEND_PUBLIC_STEPS = {
     "movie-audio": "movie-audio",
     "prepare-fonts": "subtitle",
@@ -58,20 +60,24 @@ def work_dir(args: argparse.Namespace) -> Path:
 
 def load_decisions(args: argparse.Namespace, input_stream=None) -> dict:
     use_stdin = bool(getattr(args, "decisions_stdin", False))
-    if not use_stdin:
+    supplied_payload = getattr(args, "decisions_payload", None)
+    if not use_stdin and supplied_payload is None:
         return {}
-    stream = input_stream if input_stream is not None else getattr(sys.stdin, "buffer", sys.stdin)
-    raw = stream.read()
-    try:
-        decision_text = raw.decode("utf-8-sig") if isinstance(raw, bytes) else str(raw)
-    except UnicodeDecodeError as exc:
-        raise WorkflowIssue("NEEDS_USER", "--decisions-stdin must be UTF-8 JSON") from exc
-    if not decision_text.strip():
-        raise WorkflowIssue("NEEDS_USER", "--decisions-stdin is empty")
-    try:
-        supplied = json.loads(decision_text)
-    except json.JSONDecodeError as exc:
-        raise WorkflowIssue("NEEDS_USER", "--decisions-stdin must contain a UTF-8 JSON object") from exc
+    if use_stdin:
+        stream = input_stream if input_stream is not None else getattr(sys.stdin, "buffer", sys.stdin)
+        raw = stream.read()
+        try:
+            decision_text = raw.decode("utf-8-sig") if isinstance(raw, bytes) else str(raw)
+        except UnicodeDecodeError as exc:
+            raise WorkflowIssue("NEEDS_USER", "--decisions-stdin must be UTF-8 JSON") from exc
+        if not decision_text.strip():
+            raise WorkflowIssue("NEEDS_USER", "--decisions-stdin is empty")
+        try:
+            supplied = json.loads(decision_text)
+        except json.JSONDecodeError as exc:
+            raise WorkflowIssue("NEEDS_USER", "--decisions-stdin must contain a UTF-8 JSON object") from exc
+    else:
+        supplied = supplied_payload
     if not isinstance(supplied, dict):
         raise WorkflowIssue("NEEDS_USER", "decisions must be a UTF-8 JSON object")
     metadata = supplied.get("metadata")
@@ -85,6 +91,22 @@ def load_decisions(args: argparse.Namespace, input_stream=None) -> dict:
                 for value in bindings.values()
             ):
                 raise WorkflowIssue("NEEDS_USER", "metadata season_bindings are invalid")
+    library_target = supplied.get("library_target")
+    if library_target is not None and (
+        not isinstance(library_target, dict)
+        or set(library_target) - LIBRARY_TARGET_DECISION_KEYS
+        or not str(library_target.get("storage_id") or "").startswith("storage_")
+        or not str(library_target.get("library") or "")
+        or not str(library_target.get("relative_path") or "")
+    ):
+        raise WorkflowIssue("NEEDS_USER", "library_target decision is invalid")
+    staging = supplied.get("staging")
+    if staging is not None and (
+        not isinstance(staging, dict)
+        or set(staging) - STAGING_DECISION_KEYS
+        or not str(staging.get("relative_path") or "")
+    ):
+        raise WorkflowIssue("NEEDS_USER", "staging decision is invalid")
     return supplied
 
 
@@ -286,7 +308,7 @@ def inspect_backend(work: Path, state: dict, *, rerun: bool = False) -> dict:
         extra.extend(["--title", str(decisions["title"])])
     if "metadata" in state.get("resolved_capabilities", []) and isinstance(decisions.get("metadata"), dict):
         extra.extend(["--metadata-json", json.dumps(decisions["metadata"], ensure_ascii=False, separators=(",", ":"))])
-    if state.get("branch") == "movie" and decisions.get("retain_embedded_subtitles"):
+    if state.get("branch") in {"tv", "movie"} and decisions.get("retain_embedded_subtitles"):
         extra.append("--retain-embedded-subtitles")
     for requested in state.get("requested_steps") or []:
         extra.extend(["--requested-step", str(requested)])
@@ -387,6 +409,11 @@ def approve(args: argparse.Namespace) -> dict:
         raise RuntimeError(f"state file missing: {state_path(work)}")
     if args.kind == "preflight":
         supplied = load_decisions(args)
+        retained_subtitle_choice_changed = (
+            "retain_embedded_subtitles" in supplied
+            and bool(supplied.get("retain_embedded_subtitles"))
+            != bool(state.get("decisions", {}).get("retain_embedded_subtitles"))
+        )
         if "inspect" not in state.get("completed_steps", []):
             raise WorkflowIssue("NEEDS_USER", "inspect must complete before preflight approval")
         manifest_path = backend_cache_path(work)
@@ -417,6 +444,7 @@ def approve(args: argparse.Namespace) -> dict:
             isinstance(supplied_metadata, dict)
             or metadata.get("status") == "NEEDS_USER"
             or "title" in supplied
+            or retained_subtitle_choice_changed
         )
         if refresh_metadata:
             inspect_backend(work, state, rerun=True)
@@ -456,7 +484,39 @@ def approve(args: argparse.Namespace) -> dict:
     else:
         if "review" not in state.get("completed_steps", []):
             raise WorkflowIssue("NEEDS_USER", "review must complete before final approval")
+        supplied_actions = getattr(args, "target_actions", None)
+        if supplied_actions is not None:
+            if not isinstance(supplied_actions, dict) or any(
+                not isinstance(key, str)
+                or not key
+                or not isinstance(value, str)
+                or not value
+                for key, value in supplied_actions.items()
+            ):
+                raise WorkflowIssue("NEEDS_USER", "final target actions are invalid")
+            state["final_target_actions"] = dict(supplied_actions)
+            save_state(work, state)
+            prepared = backend_command(work, "prepare-final", [])
+            final_payload = prepared.get("final", {}) if isinstance(prepared, dict) else {}
+            if final_payload:
+                zip_jobs = final_payload.get("zip", [])
+                tracker_plan = final_payload.get("trackerPlan") or {}
+                state["final_target"] = {
+                    "library": prepared.get("library"),
+                    "video_root": str(final_payload.get("targetRoot") or ""),
+                    "zip": str(zip_jobs[0].get("destination", "")) if zip_jobs else "",
+                    "tracker_column": str(tracker_plan.get("column") or "") if tracker_plan else "",
+                    "operation": prepared.get("mode"),
+                    "batch_id": prepared.get("batchId"),
+                    "batch_digest": prepared.get("batchDigest") or final_payload.get("batchDigest"),
+                    "target_summary": prepared.get("targetSummary") or final_payload.get("targetSummary") or {},
+                    "target_conflicts": prepared.get("targetConflicts") or final_payload.get("targetConflicts") or [],
+                }
+                save_state(work, state)
         target = state.setdefault("final_target", {})
+        unresolved = target.get("target_conflicts")
+        if isinstance(unresolved, list) and unresolved:
+            raise WorkflowIssue("NEEDS_USER", "final target conflicts must be resolved before approval")
         for key in ("library", "video_root", "zip", "tracker_column", "operation", "batch_id"):
             value = getattr(args, key, None)
             if value:
@@ -573,7 +633,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0 if output.get("status") not in {"FAILED", "NEEDS_USER"} else 2
     except WorkflowIssue as exc:
-        print(json.dumps({"status": exc.status, "error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
+        payload = {"status": exc.status, "error": str(exc)}
+        if exc.code:
+            payload["code"] = exc.code
+        if exc.details:
+            payload["details"] = exc.details
+        if exc.retryable:
+            payload["retryable"] = True
+        print(json.dumps(payload, ensure_ascii=False, indent=2), file=sys.stderr)
         return 2
     except ToolchainError as exc:
         print(

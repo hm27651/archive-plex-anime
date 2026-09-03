@@ -52,7 +52,7 @@ init → inspect → approve-preflight
 
 前置确认一次性展示：分支、模式、实际库位、新建/洗版、压制组（TV 可按季指定）、TV 季集或 Movie 名称、字幕组/语言/顺序/默认项、保留和删除音轨、章节、字体问题、Movie 原盘映射与固定偏移、选中步骤。
 
-用户决定使用 UTF-8 `--decisions-stdin` 合并。常用键包括 `title`、`metadata`、`release_group`、`release_group_by_season`、TV 的 `subtitle_order_by_season`、兼容/ Movie 使用的 `subtitle_order`、Movie 的 `default_subtitle`、`embedded_subtitle_names`、`video_keep`、`audio_keep`、`keep_chapters`、`episode_map`、`disc_source`、`video_source` 和 `movie_audio_pairs`。轨道和集数决定统一以工作目录相对路径为键：
+用户决定使用 UTF-8 `--decisions-stdin` 合并。常用键包括 `title`、`metadata`、`release_group`、`release_group_by_season`、TV 的 `subtitle_order_by_season`、兼容/ Movie 使用的 `subtitle_order`、Movie 的 `default_subtitle`、TV/Movie 共用的 `retain_embedded_subtitles` 和 `embedded_subtitle_names`、`video_keep`、`audio_keep`、`keep_chapters`、`episode_map`、`disc_source`、`video_source` 和 `movie_audio_pairs`。轨道和集数决定统一以工作目录相对路径为键：
 
 ```json
 {
@@ -96,9 +96,13 @@ TV 字幕组并行输出到 `Sx/字幕组`；Movie 字幕平铺到根目录。�
 
 ## 4. remux 与 package
 
+本机命令默认仍把可见 ASS、MKV 和 ZIP 生成在作品目录。Hub 设置 `ARCHIVE_TASK_OUTPUT_ROOT` 时，计划器把这些待验收产物连同执行缓存、remux 临时文件和恢复检查点写入独立任务输出目录；源作品目录不再承载新的可见产物。任务输出根必须与工作根、正式媒体根和字幕归档根互不重叠。
+
 MKVToolNix 严格串行封装。主媒体轨道按前检生成的精确轨道映射选择；MKA、外挂 ASS 等辅助输入使用限定参数。TV/Movie 都删除 PGS；每条预期轨道必须完整声明类型、名称、语言、默认、强制及适用的声道信息，并由 mkvmerge 参数显式设置。章节和附件同样写入精确预期；静态契约在执行前拒绝字段不全或重复目标。
 
-一次 remux 调用按整批跟踪产物：任何剧集失败时，回收本轮已生成的 MKV 及 `.archive-temp/remux` 临时文件，不留下可见的半批次结果；成功重跑后，只清理执行缓存中有记录、仍位于任务目录内且轻量签名未变化的上一轮 remux 产物。为覆盖进程被强制中断的情况，每个 MKV 落位前只写一个轻量 `attempt.json` 清单，正常成功或失败立即删除；下次 remux 先按签名回收中断残留再删除清单。源视频、签名已变化文件和无关编号文件始终保留。因此用户验收时正常只看到源文件和本轮最终 MKV；失败后仍从整批开头重跑，不提供逐文件恢复。
+remux 按文件建立可恢复检查点：每个 MKV 先写入 `.archive-temp/remux` 临时文件，落位后立即完成轨道、章节、附件验收，并将输入签名、计划摘要、实际输出签名和验收结果原子写入 `resume.json`。任一文件失败时只回收当前 `.tmp` 或尚未写入检查点的当前输出，已经验收并写入检查点的 MKV 保留；重试时逐项验证输入、计划和输出签名，匹配的文件直接复用，从首个无效或未完成项继续。缓存损坏、输入/计划变化或产物签名不符时不得复用；用户修改过的产物不得删除或覆盖。完整批次成功后，才清理签名仍匹配且已被当前批次取代的旧产物。
+
+remux 开始前按剩余未完成任务的源媒体、外挂字幕和附件大小估算空间，并保留安全余量；空间不足时在调用 mkvmerge 前返回 `ARCHIVE_INSUFFICIENT_SPACE`，同时给出预计输出、当前可用、剩余文件和可复用文件数量。运行期间出现系统 `No space left` 时使用同一稳定错误码，保留已完成检查点，释放空间后可继续。
 
 ZIP 使用存储模式并将最终中文条目统一写为 UTF-8；读取未设置 UTF-8 标记的本机旧归档时按 GB18030 兼容解码。TV 条目为 `Sx/字幕组/文件.ass`；Movie 条目平铺。MKV 与 ZIP 标准名冲突同样使用 Windows 编号。字幕归档目标已存在时，package 先读取中央目录并在工作目录生成完整合并 ZIP：旧独有条目保留，本次规范化同路径条目优先；绝对路径、`..`、空路径段及 NFKC/大小写等价重复条目直接失败。`archive-only` 的预制 ZIP 同样先进入 package 合并，不直接覆盖归档目标。
 
@@ -142,6 +146,7 @@ ZIP 使用存储模式并将最终中文条目统一写为 UTF-8；读取未设�
 
 - `create` 在生成最终摘要时要求目标不存在，并在实际复制前再次轻量确认；若期间出现同名目标则停止，避免覆盖他人新建内容；
 - `replace` 在最终摘要生成时确认原目标存在，用户最终确认后直接覆盖，不做整文件哈希或额外复检；
+- 同一最终批次可以同时包含 `create` 与 `replace`。无法唯一确定动作的文件以稳定冲突选项进入最终验收；冲突全部解决并重新密封批次后才能批准写入；
 - 合并字幕 ZIP 在 package 时记录目标中央目录的“规范路径、CRC32、大小”摘要；review 与实际提交前各快速比较一次，目标发生实质变化时以 `ZIP_MERGE_BASE_CHANGED` 零写入失败并要求重新合并；
 - 维护表按 KDocs 上限分块；开始或重试时将实时目标列与“已完成块为本批次预期、未完成块为前检快照”的各合法前缀匹配，每块成功立即保存进度并从首个未完成块续传；无法匹配任何合法前缀才以 `TRACKER_CONCURRENT_CHANGE` 停止继续写入并失败；
 - 最终视频、ZIP 和维护表仍并行执行，上述检查不增加确认关卡。
@@ -166,7 +171,13 @@ ZIP 使用存储模式并将最终中文条目统一写为 UTF-8；读取未设�
 - `FAILED`：确认后输入/环境/目标变化，或执行失败；
 - `WARNING`：产物合格的非阻塞信息。
 
-## 7. 编码与性能
+## 7. Hub 执行协议
+
+`python -B scripts/hub_executor.py describe` 输出 Hub 固定使用的协议描述；`execute` 从 stdin 读取一个请求，并在命令运行期间向 stdout 逐条刷新 NDJSON。协议 1.3 增加只读 `metadata_preview`：草稿编辑期间可返回候选作品、季度、集数与证据，但不扫描媒体、不生成文件、不修改任务状态。事件固定包含 `inputs/staged/final` 三组产物、恢复检查点、真实文件 `progress` 和唯一 `next_action`；分析投影提供 `workflow_options`、`decision_requests`、`media_rows`、`metadata_evidence` 与 `review_items`。一个实际案例是：Hub 创建 TV 洗版任务时保存 `work_root=F:\pt&bt\anime\TV` 与 `task_relative_path=测试作品`，执行端只在两者解析出的作品目录内运行，浏览器不能直接发送另一条绝对路径；最终确认只传 `storage_id=storage_1`，执行端根据 TV 分支派生 Anime 目录，并根据任务标题派生字幕 ZIP。
+
+每条命令使用 `task_id + run_id + command_id` 标识。并发或网络重试再次发送完全相同的命令时，在跨进程原子占用下重放 `.archive-temp/protocol-commands` 中的原事件；相同 `command_id` 改动参数时直接拒绝，原进程中断时同一命令返回稳定中断结果而不重做。Hub 入口只允许视频和字幕 ZIP，请求任意层级都不包含 KDocs 或 TMDB/TVDB 凭据；凭据只能由 Hub 在选择元数据能力时通过子进程环境注入。
+
+## 8. 编码与性能
 
 - 中文路径使用 Unicode 参数和 `pathlib.Path`；
 - JSON stdin/stdout、日志、Markdown、KDocs 使用 UTF-8；

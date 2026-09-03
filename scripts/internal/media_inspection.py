@@ -79,7 +79,11 @@ def normalize_mediainfo(payload: dict[str, Any]) -> dict[str, Any]:
     for raw in raw_tracks:
         kind = _type(raw.get("@type"))
         if raw.get("@type") == "Menu":
-            chapter_count = len(raw.get("extra", {}) or {})
+            # MediaInfo 23.04 can report a real MKV chapter edition as an empty
+            # Menu track (for example {"@type": "Menu", "": null}).  The
+            # presence of the Menu track is still authoritative for the
+            # preserve/drop decision even when this version omits its entries.
+            chapter_count += max(1, len(raw.get("extra", {}) or {}))
             continue
         if not kind:
             continue

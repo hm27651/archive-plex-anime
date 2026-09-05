@@ -14,7 +14,7 @@ from typing import Any, Iterable
 
 STATE_SCHEMA = 8
 BACKEND_CACHE_SCHEMA = 19
-RULES_VERSION = 19
+RULES_VERSION = 20
 WORKFLOW_REVISION = "2026-08-25-hub-risk-fixes-v1"
 STATE_NAME = ".archive-state.json"
 BACKEND_CACHE_NAME = "execution-cache.json"

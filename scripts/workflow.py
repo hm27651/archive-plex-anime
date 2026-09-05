@@ -24,7 +24,7 @@ from capabilities import (
     legacy_steps_to_capabilities,
     resolve_capabilities,
 )
-from common import WorkflowIssue, backend_cache_path, backend_command, configure_utf8_stdio, load_config, load_state, read_text, save_state
+from common import WorkflowIssue, backend_cache_path, backend_command, configure_utf8_stdio, load_config, load_state, read_text, save_state, write_json_atomic
 from media_plan import build_plan, local_only_request_issues
 from plan_common import update_release_history
 from toolchain import ToolchainError, check_tools, export_projection, list_tools, update_tool_path
@@ -33,7 +33,7 @@ from toolchain import ToolchainError, check_tools, export_projection, list_tools
 TASKS = set(PRESETS)
 METADATA_DECISION_KEYS = {
     "enabled", "mode", "query", "tmdb_id", "tmdb_type", "tvdb_id", "language",
-    "episode_order", "year", "season_bindings",
+    "episode_order", "year", "season_bindings", "provider",
 }
 METADATA_BINDING_KEYS = {"tmdb_id", "tmdb_season"}
 LIBRARY_TARGET_DECISION_KEYS = {"storage_id", "library", "relative_path"}
@@ -320,7 +320,7 @@ def inspect_backend(work: Path, state: dict, *, rerun: bool = False) -> dict:
         extra.append("--kdocs-tracker")
     movie_audio_pairs = decisions.get("movie_audio_pairs")
     disc_source = decisions.get("disc_source") or decisions.get("m2ts")
-    if state.get("branch") == "movie" and (movie_audio_pairs or disc_source or decisions.get("movie_audio_replacement")):
+    if state.get("branch") == "movie" and decisions.get("movie_plan", {}).get("schema_version") != 2 and (movie_audio_pairs or disc_source or decisions.get("movie_audio_replacement")):
         extra.append("--movie-audio-replacement")
         if movie_audio_pairs:
             extra.extend(["--movie-audio-pairs-json", json.dumps(movie_audio_pairs, ensure_ascii=False, separators=(",", ":"))])
@@ -338,6 +338,7 @@ def configure_backend(work: Path, state: dict) -> dict:
         raise WorkflowIssue("NEEDS_USER", "inspection cache is missing; rerun inspect before approval")
     manifest = json.loads(read_text(manifest_path))
     generated = build_plan(work, manifest, state)
+    write_json_atomic(manifest_path, manifest)
     if generated["issues"]:
         status = "FAILED" if any(str(item.get("code", "")).startswith("CONTRACT_") for item in generated["issues"]) else "NEEDS_USER"
         raise WorkflowIssue(status, json.dumps({"issues": generated["issues"]}, ensure_ascii=False))

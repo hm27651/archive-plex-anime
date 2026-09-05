@@ -72,6 +72,9 @@ def invalidate_from(manifest: dict[str, Any], stage: str, reason: str) -> None:
 
 def source_drift(manifest: dict[str, Any]) -> list[str]:
     changed = []
+    for signature in manifest.get("discovery", {}).get("movieSourceFiles", []):
+        if not signature_matches(signature):
+            changed.append(signature["path"])
     for video in manifest.get("discovery", {}).get("videos", []):
         signature = video.get("file")
         if signature and not signature_matches(signature):
@@ -150,6 +153,8 @@ def jobs_equal_except(old_jobs: Any, new_jobs: Any, field: str) -> bool:
 
 
 def reuse_path_only_outputs(old: dict[str, Any], new: dict[str, Any]) -> None:
+    if new.get("movieWorkbench"):
+        return  # Older Movie artifacts remain available; remux validates reuse.
     """Reconnect completed artifacts when only their planned path changed."""
 
     for jobs_key, field, ass in (("renameJobs", "target", True), ("remuxJobs", "output", False)):

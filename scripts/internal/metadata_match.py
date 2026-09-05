@@ -486,6 +486,39 @@ def inspect_metadata(
         base["issues"].append({"code": "METADATA_CONFIG_INVALID"})
         return base
 
+    if media_type == "movie" and supplied.get("provider") == "tvdb":
+        http = http_factory(proxy=proxy or None, timeout=options["timeout"], retries=2)
+        try:
+            client = TvdbClient(http)
+            selected_id = _safe_int(options["tvdbId"])
+            searched = [] if selected_id else client.search(query, "movie", year=_safe_int(options["year"]))
+            base["candidates"] = [
+                {"provider": "tvdb", "mediaType": "movie", "id": int(item["tvdb_id"]),
+                 "title": (item.get("translations") or {}).get("zho") or item.get("name") or "",
+                 "originalTitle": item.get("name") or "", "year": item.get("year")}
+                for item in searched if str(item.get("tvdb_id") or "").isdigit()
+            ]
+            if not selected_id:
+                base["status"] = "NEEDS_USER"
+                base["issues"].append({"code": "METADATA_CANDIDATE_REQUIRED", "provider": "tvdb", "candidates": base["candidates"]})
+                return base
+            details = client.movie(selected_id)
+            name = str(details.get("name") or "")
+            translated = details.get("translations", {})
+            names = translated.get("nameTranslations", []) if isinstance(translated, dict) else []
+            preferred = next((t.get("name") for t in names if t.get("language") == "zho"), None)
+            selected = {"provider": "tvdb", "mediaType": "movie", "id": selected_id, "title": preferred or name,
+                        "originalTitle": name, "originalLanguage": details.get("originalLanguage") or "", "aliases": [], "seasons": []}
+            base.update(status="MATCHED", selected=selected, tvdb={"status": "MATCHED", "id": selected_id, "name": name})
+            if not base["candidates"]:
+                base["candidates"] = [selected]
+            base["suggestedDecisions"] = {"title": selected["title"], "metadata": {**supplied, "provider": "tvdb", "tvdb_id": selected_id, "tmdb_type": "movie"}}
+            return base
+        except MetadataHttpError as exc:
+            base["status"] = "NEEDS_USER"
+            base["issues"].append({"code": exc.code, "provider": "tvdb", "detail": str(exc)})
+            return base
+
     explicit_tmdb = _safe_int(options["tmdbId"])
     if explicit_tmdb is None and query_selection["issues"]:
         base["status"] = "NEEDS_USER"
@@ -517,6 +550,7 @@ def inspect_metadata(
         return base
 
     selected = normalize_tmdb_details(details, media_type)
+    selected["originalLanguage"] = str(details.get("original_language") or "")
     base["selected"] = selected
     base["suggestedDecisions"] = {
         "title": selected["title"] or selected["originalTitle"],

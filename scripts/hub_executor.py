@@ -282,6 +282,14 @@ def _decision_requests(analysis: dict[str, Any], output: dict[str, Any]) -> list
         "MANUAL_REPLACEMENT_TARGET_MISSING": ("重新选择现有作品位置", "directory", "library_target"),
         "STAGING_OUTPUT_REQUIRED": ("选择任务输出位置", "directory", "staging"),
         "CAPABILITY_UNAVAILABLE": ("恢复所需功能", "notice", ""),
+        "FONT_NOT_FOUND": ("补齐字体或取消对应字幕", "choice", "subtitles"),
+        "MOVIE_SUBTITLE_INFO_REQUIRED": ("补充字幕组和类型", "choice", "subtitles"),
+        "MOVIE_SUBTITLE_VERSION_REQUIRED": ("区分重复字幕版本", "choice", "subtitles"),
+        "MOVIE_EXTERNAL_AUDIO_CONFIRMATION_REQUIRED": ("确认外部音轨适用性", "choice", "audio"),
+        "MOVIE_DEFAULT_AUDIO_REQUIRED": ("选择默认音轨", "choice", "audio"),
+        "MAIN_AUDIO_REQUIRED": ("选择正片音轨", "choice", "audio"),
+        "MOVIE_TARGET_CONFLICT": ("确认视频版本和分段", "choice", "video"),
+        "MOVIE_VIDEO_REQUIRED": ("选择本次处理的视频", "choice", "video"),
     }
     result = []
     seen: set[str] = set()
@@ -299,9 +307,10 @@ def _decision_requests(analysis: dict[str, Any], output: dict[str, Any]) -> list
                 **issue,
                 "message": "已选择必须获取在线剧集信息；请检查元数据连接，或改用自动/离线模式。",
             }
-        if code in seen and code != "SUBTITLE_EPISODE_UNMATCHED":
+        identity = json.dumps([code, issue.get("target_id"), issue.get("source"), issue.get("font")], ensure_ascii=False)
+        if identity in seen and code != "SUBTITLE_EPISODE_UNMATCHED":
             continue
-        seen.add(code)
+        seen.add(identity)
         label, kind, field = labels.get(code, ("还有一项信息需要确认", "notice", ""))
         if code == "CAPABILITY_UNAVAILABLE" and capability == "metadata":
             label, kind, field = "恢复在线剧集信息", "notice", "metadata.mode"
@@ -390,6 +399,7 @@ def _inspect_analysis(work: Path, output: dict[str, Any]) -> dict[str, Any]:
         "missing_fonts": discovery.get("missingFonts", []),
         "embedded_subtitles": discovery.get("embeddedSubtitles", {}),
         "movie_audio": discovery.get("movieAudioPreflights", []),
+        "movie_targets": discovery.get("movie_targets", []),
         "library_target": discovery.get("libraryTarget"),
         "metadata": discovery.get("metadata", {}),
     }
@@ -450,6 +460,9 @@ def _dispatch(request: dict[str, Any]) -> dict[str, Any]:
     if command == "metadata_check":
         return _metadata_check(payload)
     work = resolve_work_dir(request["path_snapshot"])
+    if command == "inspect_sources":
+        from internal.movie_workbench import inspect_sources
+        return inspect_sources(work, load_config())
     if command == "metadata_preview":
         decisions = payload.get("decisions") if isinstance(payload.get("decisions"), dict) else {}
         metadata = decisions.get("metadata") if isinstance(decisions.get("metadata"), dict) else {}
@@ -916,7 +929,7 @@ def execute(
     request = validate_request(request_value)
     work = None if request["command"] in {"capabilities", "recommend", "metadata_check"} else resolve_work_dir(request["path_snapshot"])
     digest = request_digest(request)
-    cache_work = None if request["command"] in {"cleanup_preview", "cleanup_execute"} else work
+    cache_work = None if request["command"] in {"cleanup_preview", "cleanup_execute", "inspect_sources"} else work
     cache = _command_cache(cache_work, request["command_id"])
     with _exclusive_command_lock(cache):
         cached = _replay_cached_events(cache, request, digest)
@@ -977,7 +990,7 @@ def execute(
                 _ACTIVE_PROGRESS.reset(progress_token)
             status = normalized_status(output.get("status"))
             summary = str(output.get("summary") or output.get("error") or status)
-            state = _workflow_state(work, output)
+            state = {} if request["command"] == "inspect_sources" else _workflow_state(work, output)
             final_event = event(
                 request,
                 sequence=len(events) + 1,

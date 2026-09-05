@@ -112,7 +112,7 @@ def validate_mkv_output(
         if index >= len(actual_tracks):
             break
         actual = actual_tracks[index]
-        for key in ("type", "language", "name", "default", "forced", "channels"):
+        for key in ("type", "language", "name", "default", "forced", "channels", "codecId"):
             if key not in expected:
                 continue
             expected_value = expected.get(key)
@@ -128,7 +128,7 @@ def validate_mkv_output(
         if track.get("type") == "audio"
         and re.search(r"commentary|评论|解说", str(track.get("name") or ""), re.IGNORECASE)
     ]
-    if commentary:
+    if commentary and not job.get("allowSelectedCommentary"):
         mismatches.append("commentary audio remains")
     warnings: list[str] = []
     if "expectedChapters" in job:
@@ -189,6 +189,7 @@ def remux_job_input_signatures(job: dict[str, Any]) -> list[dict[str, Any]]:
     candidates: list[Path] = []
     if job.get("source"):
         candidates.append(resolve_path(job["source"]))
+    candidates.extend(resolve_path(value) for value in job.get("inputFiles", []))
     for source_plan in job.get("trackSources", []):
         if source_plan.get("source"):
             candidates.append(resolve_path(source_plan["source"]))
@@ -319,7 +320,13 @@ def execute_remux(
             if isinstance(entry, dict) and isinstance(entry.get("index"), int):
                 resume_entries[int(entry["index"])] = entry
     original_resume_entries = dict(resume_entries)
+    if any(job.get("targetId") for job in jobs):
+        by_target = {entry.get("targetId"): entry for entry in resume_entries.values() if entry.get("targetId")}
+        resume_entries = {index: {**by_target[job["targetId"]], "index": index} for index, job in enumerate(jobs) if job.get("targetId") in by_target}
 
+    for job in jobs:
+        if job.get("targetId"):
+            job["expectedAttachments"] = sorted({*job.get("expectedAttachments", []), *external_ass_attachment_names(job)})
     job_inputs = [remux_job_input_signatures(job) for job in jobs]
     job_digests = [remux_job_digest(job, job_inputs[index]) for index, job in enumerate(jobs)]
     reusable_entries: dict[int, dict[str, Any]] = {}
@@ -559,6 +566,7 @@ def execute_remux(
             results.append(item_result)
             resume_entries[index] = {
                 "index": index,
+                "targetId": job.get("targetId"),
                 "jobDigest": job_digests[index],
                 "inputs": job_inputs[index],
                 "result": item_result,
@@ -595,7 +603,7 @@ def execute_remux(
                 continue
             old_output = resolve_path(signature["path"])
             key = path_key(old_output)
-            if key in current_paths or key in protected_paths or not is_under(old_output, output_root):
+            if any(job.get("targetId") for job in jobs) or key in current_paths or key in protected_paths or not is_under(old_output, output_root):
                 continue
             if signature_matches(signature):
                 old_output.unlink()

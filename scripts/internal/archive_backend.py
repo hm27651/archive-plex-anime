@@ -303,6 +303,8 @@ def inspect_library_existing(config: dict[str, Any], title: str, branch: str, pr
             }
             return {"trackerState": tracker_state, "trackerMatches": [], "nasMatches": [], "resolution": resolution}
         selected = (root / Path(*relative.parts)).resolve(strict=False)
+        if branch == "movie" and config.get("hubTask", {}).get("moviePlan", {}).get("schema_version") == 2 and is_under(selected, root) and not selected.exists():
+            return {"trackerState": tracker_state, "trackerMatches": [], "nasMatches": [], "resolution": {"status": "OK", "mode": "create", "library": library, "manual": True, "nas": {"path": str(selected), "library": library}}}
         if not is_under(selected, root) or not selected.is_dir():
             resolution = {
                 "status": "NEEDS_USER",

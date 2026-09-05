@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import concurrent.futures
 import hashlib
 import os
@@ -857,6 +859,17 @@ def subset_subtitles(
         inputs = [resolve_path(value) for value in group.get("inputs", [])]
         if not inputs:
             raise WorkflowError("SUBTITLE_GROUP_EMPTY", f"Subtitle group has no inputs: {group.get('name', index)}")
+        cache = inputs[0].with_suffix(".subset-state.json") if manifest.get("plan", {}).get("movieWorkbench") and len(inputs) == 1 else None
+        required = discovery_by_path.get(os.path.normcase(str(inputs[0])), set())
+        cache_basis = {
+            "inputs": [file_signature(p) for p in inputs],
+            "fonts": [f.get("selectedSource") for f in manifest.get("discovery", {}).get("fontAvailability", []) if f.get("normalized") in required],
+            "tool": file_signature(Path(assfonts)) if Path(assfonts).is_file() else assfonts,
+        }
+        if cache and cache.is_file() and not retry:
+            cached = json.loads(cache.read_text(encoding="utf-8"))
+            if cached.get("basis") == cache_basis and all(signature_matches(s) for s in cached.get("result", {}).get("outputs", [])) and cached.get("result", {}).get("outputs"):
+                return cached["result"]
         active_font_paths = override_font_paths or font_paths
         active_database = override_database or database
         inputs_by_directory: dict[str, list[Path]] = {}
@@ -891,7 +904,7 @@ def subset_subtitles(
             validate_subset_output(output, log, required_names)
             outputs.append(file_signature(output))
         warning = "not a .ttf" in log and "[ERROR]" not in log
-        return {
+        result = {
             "name": group.get("name", str(index)),
             "index": index,
             "inputs": [str(item) for item in inputs],
@@ -901,6 +914,9 @@ def subset_subtitles(
             "warning": warning,
             "retry": retry,
         }
+        if cache:
+            cache.write_text(json.dumps({"basis": cache_basis, "result": result}, ensure_ascii=False), encoding="utf-8")
+        return result
 
     results: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
@@ -1019,16 +1035,28 @@ def rename_subtitles(manifest: dict[str, Any], *, direct_output: bool = False) -
     for job in jobs:
         source, planned_target = resolve_path(job["source"]), resolve_path(job["target"])
         target = planned_target
-        if direct_output and target.exists() and target.resolve() != source.resolve():
+        movie = bool(manifest.get("plan", {}).get("movieWorkbench"))
+        rename_cache = source.with_suffix(".rename-state.json")
+        rename_basis = {"source": file_signature(source), "planned": str(planned_target)} if movie and source.is_file() else None
+        if movie and rename_cache.is_file():
+            previous = json.loads(rename_cache.read_text(encoding="utf-8"))
+            if previous.get("basis") == rename_basis and signature_matches(previous.get("output") or {}):
+                target = resolve_path(previous["output"]["path"])
+        if movie and target.exists() and source.is_file() and read_ass_text(target) != read_ass_text(source):
+            target = numbered_output_path(planned_target)
+        if not movie and direct_output and target.exists() and target.resolve() != source.resolve():
             target = numbered_output_path(target)
         if not source.is_file():
             raise WorkflowError("RENAME_SOURCE_MISSING", f"Rename source missing: {source}")
-        if target.exists() and target.resolve() != source.resolve():
+        if not movie and target.exists() and target.resolve() != source.resolve():
             raise WorkflowError("RENAME_TARGET_EXISTS", f"Rename target exists: {target}", "DECISION_REQUIRED")
         target.parent.mkdir(parents=True, exist_ok=True)
         text = read_ass_text(source)
-        write_ass_text(target, text)
-        if source.resolve() != target.resolve():
+        if not movie or not target.exists():
+            write_ass_text(target, text)
+        if movie:
+            rename_cache.write_text(json.dumps({"basis": rename_basis, "output": file_signature(target)}, ensure_ascii=False), encoding="utf-8")
+        if not movie and source.resolve() != target.resolve():
             source.unlink()
         if target != planned_target:
             for remux_job in manifest.get("plan", {}).get("remuxJobs", []):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from common import backend_cache_path, backend_command, read_text, result, save_state
+from common import backend_cache_path, backend_command, read_text, result, save_state, write_json_atomic
 from media_plan import build_plan
 
 
@@ -59,7 +59,7 @@ def run(context):
         extra.append("--kdocs-tracker")
     movie_audio_pairs = decisions.get("movie_audio_pairs")
     disc_source = decisions.get("disc_source") or decisions.get("m2ts")
-    if state.get("branch") == "movie" and (movie_audio_pairs or disc_source or decisions.get("movie_audio_replacement")):
+    if state.get("branch") == "movie" and decisions.get("movie_plan", {}).get("schema_version") != 2 and (movie_audio_pairs or disc_source or decisions.get("movie_audio_replacement")):
         extra.append("--movie-audio-replacement")
         if movie_audio_pairs:
             extra.extend(["--movie-audio-pairs-json", json.dumps(movie_audio_pairs, ensure_ascii=False, separators=(",", ":"))])
@@ -73,6 +73,7 @@ def run(context):
     if backend_cache_path(work).is_file():
         manifest = json.loads(read_text(backend_cache_path(work)))
         generated = build_plan(work, manifest, state)
+        write_json_atomic(backend_cache_path(work), manifest)
         state["selected_steps"] = generated["selected_steps"]
         for key in (
             "requested_capabilities",
@@ -91,6 +92,7 @@ def run(context):
             "metadata": public_metadata_summary(generated.get("metadata")),
         }
     pending = bool(preflight and preflight["issues"])
-    status = "NEEDS_USER" if output.get("status") == "NEEDS_USER" or pending else "COMPLETE"
+    movie_v2 = decisions.get("movie_plan", {}).get("schema_version") == 2
+    status = "NEEDS_USER" if pending or (output.get("status") == "NEEDS_USER" and not movie_v2) else "COMPLETE"
     metadata_warnings = preflight.get("metadata", {}).get("warnings", []) if preflight else []
     return result(status, "quick inspection complete", warnings=metadata_warnings, preflight=preflight)

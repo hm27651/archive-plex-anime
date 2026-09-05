@@ -336,6 +336,29 @@ def _extract_subtitle_zip(work: Path, signature: dict[str, Any]) -> list[Path]:
     return sorted(dict.fromkeys(extracted))
 
 
+def selected_font_inventory(manifest: dict, subtitles: list[dict], config: dict, work: Path) -> None:
+    """Font readiness for selected ASS only, with actionable per-file issues."""
+    requirements = {}
+    for subtitle in subtitles:
+        for font in subtitle.get("fonts", []):
+            requirements.setdefault(font["normalized"], font)
+    database = Path(str(config.get("paths", {}).get("assfontsDatabase") or work / "__missing_database__")) / "fonts.json"
+    records = load_assfonts_database(database) if requirements and database.is_file() else []
+    primary = Path(str(config.get("paths", {}).get("primaryFonts") or work / "__missing_fonts__"))
+    fallback_value = config.get("paths", {}).get("fallbackFonts")
+    def fallback_loader():
+        fallback = Path(fallback_value)
+        return load_fallback_font_database(fallback_font_database_path(config, fallback), fallback)["records"]
+    availability, _issues = resolve_font_availability(list(requirements.values()), records, work, primary, fallback_loader if fallback_value else None)
+    missing = {item["normalized"]: item for item in availability if not item.get("available")}
+    issues = []
+    for subtitle in subtitles:
+        for font in subtitle.get("fonts", []):
+            if font["normalized"] in missing:
+                issues.append({"code": "FONT_NOT_FOUND", "font": font["name"], "source": subtitle.get("original_source") or subtitle["file"]["path"], "target_id": subtitle.get("target_id"), "stage_id": "subtitles"})
+    manifest["discovery"].update(subtitles=subtitles, fontRequirements=list(requirements.values()), fontAvailability=availability, fontIssues=issues, missingFonts=list(missing.values()))
+
+
 def execute_inspection(
     args: Any,
     *,
@@ -365,6 +388,16 @@ def execute_inspection(
     checked_components: set[str] = set()
 
     videos, external_subtitles = file_lister(work)
+    excluded = set(config.get("hubTask", {}).get("excludedFiles") or [])
+    external_subtitles = [p for p in external_subtitles if p.relative_to(work).as_posix() not in excluded]
+    movie_plan = config.get("hubTask", {}).get("moviePlan", {})
+    if movie_plan.get("schema_version") == 2:
+        from internal.movie_workbench import source_path
+        targets = movie_plan.get("targets", [])
+        chosen = {str(t.get("video") or "") for t in targets}
+        chosen.update(str(r.get("source") or "") for t in targets for r in t.get("audio", []))
+        videos = [source_path(work, p) for p in sorted(chosen)]
+        external_subtitles = []  # selected ASS is prepared by the shared Movie planner
     mediainfo = tool_resolver(config, "mediainfo")
     mediainfo_identity = _tool_identity(config, "mediainfo", mediainfo)
     video_items = [

@@ -8,7 +8,8 @@ def run(context):
     progress_path = temporary_path(context["work_dir"], "hub-progress", "remux.json")
     progress_path.unlink(missing_ok=True)
     extra = ["--direct-output", "--progress-file", str(progress_path)]
-    if "review" in context["state"].get("selected_steps", []):
+    movie_v2 = context["state"].get("decisions", {}).get("movie_plan", {}).get("schema_version") == 2
+    if "review" in context["state"].get("selected_steps", []) and not movie_v2:
         extra.append("--defer-output-validation")
     callback = getattr(context["args"], "progress", None)
     last_progress: dict = {}

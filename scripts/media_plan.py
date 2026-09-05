@@ -59,7 +59,18 @@ def build_plan(work: Path, manifest: dict[str, Any], state: dict[str, Any]) -> d
     task = str(state.get("task") or "complete-archive")
     decisions = state.get("decisions", {})
     issues: list[dict[str, Any]] = []
-    issues.extend(manifest.get("discovery", {}).get("fontIssues", []))
+    movie_v2 = branch == "movie" and decisions.get("movie_plan", {}).get("schema_version") == 2
+    if not movie_v2:
+        import json
+        from internal.preflight import selected_font_inventory
+        discovery = manifest.get("discovery", {})
+        excluded = set(decisions.get("excluded_files") or [])
+        selected_subtitles = [s for s in discovery.get("subtitles", []) if not (
+            Path(s["file"]["path"]).is_relative_to(work) and Path(s["file"]["path"]).relative_to(work).as_posix() in excluded
+        )]
+        if manifest.get("configPath") and Path(manifest["configPath"]).is_file():
+            selected_font_inventory(manifest, selected_subtitles, json.loads(Path(manifest["configPath"]).read_text(encoding="utf-8")), work)
+        issues.extend(discovery.get("fontIssues", []))
     metadata = manifest.get("discovery", {}).get("metadata", {})
     if isinstance(metadata, dict):
         issues.extend(metadata.get("issues", []))
@@ -87,7 +98,10 @@ def build_plan(work: Path, manifest: dict[str, Any], state: dict[str, Any]) -> d
             completed_steps=set(state.get("completed_steps", [])),
         )
     elif branch == "movie":
-        generated = build_movie_plan(
+        movie_builder = build_movie_plan
+        if movie_v2:
+            from internal.movie_workbench import build_movie_plan as movie_builder
+        generated = movie_builder(
             work,
             manifest,
             decisions,
@@ -123,7 +137,7 @@ def build_plan(work: Path, manifest: dict[str, Any], state: dict[str, Any]) -> d
                 resolved_library = requested_library
             elif requested_library and requested_library != resolved_library:
                 issues.append({"code": "LIBRARY_DECISION_CONFLICT", "requested": requested_library, "resolved": resolved_library})
-            if task == "replacement" and resolution.get("mode") == "create":
+            if task == "replacement" and resolution.get("mode") == "create" and not movie_v2:
                 issues.append({"code": "REPLACEMENT_TARGET_REQUIRED", "library": resolved_library})
             plan["preferredLibrary"] = resolved_library
             plan["libraryTarget"] = {**resolution, "library": resolved_library}
@@ -133,6 +147,8 @@ def build_plan(work: Path, manifest: dict[str, Any], state: dict[str, Any]) -> d
     requested_capabilities = state.get("requested_capabilities")
     if requested_capabilities is None:
         requested_capabilities = legacy_steps_to_capabilities(state.get("requested_steps"))
+    if movie_v2 and isinstance(requested_capabilities, list):
+        requested_capabilities = [c for c in requested_capabilities if c != "movie-audio" and (c != "subtitle" or plan.get("subtitleGroups"))]
     resolution = resolve_capabilities(
         selection_mode=selection_mode,
         preset=str(state.get("preset") or task),
@@ -143,6 +159,8 @@ def build_plan(work: Path, manifest: dict[str, Any], state: dict[str, Any]) -> d
     )
     issues.extend(resolution["issues"])
     apply_final_sinks(plan, resolution["final_sinks"])
+    if movie_v2 and "package" not in resolution["selected_steps"]:
+        plan["package"] = None
     if plan:
         issues.extend(validate_plan(work.resolve(), branch, task, plan))
     selected = resolution["selected_steps"]

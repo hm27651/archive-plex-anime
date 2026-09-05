@@ -17,16 +17,17 @@ from internal.hub_task_contract import (
 )
 
 
-PROTOCOL_VERSION = "1.4"
-COMPATIBLE_PROTOCOL_VERSIONS = ("1.3", PROTOCOL_VERSION)
+PROTOCOL_VERSION = "1.5"
+COMPATIBLE_PROTOCOL_VERSIONS = ("1.3", "1.4", PROTOCOL_VERSION)
 PROTOCOL_SCHEMA_VERSION = 1
 ENGINE_NAME = "archive-plex-anime"
-ENGINE_VERSION = "2026-09-01-single-work-task-v1"
+ENGINE_VERSION = "2026-09-05-movie-workbench-v2"
 COMMANDS = (
     "capabilities",
     "recommend",
     "metadata_check",
     "metadata_preview",
+    "inspect_sources",
     "initialize",
     "status",
     "approve_preflight",
@@ -54,6 +55,7 @@ COMMAND_PAYLOAD_FIELDS = {
     "recommend": ("branch", "has_storage", "has_subtitle_archive", "metadata_enabled"),
     "metadata_check": ("providers", "proxy", "language"),
     "metadata_preview": ("decisions", "local_seasons"),
+    "inspect_sources": (),
     "initialize": (
         "preset",
         "capabilities",

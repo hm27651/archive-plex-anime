@@ -86,7 +86,8 @@ class MovieWorkbenchTests(unittest.TestCase):
                 generated = self.build(target, inventory)
                 self.assertEqual(generated["issues"], [])
                 job = generated["plan"]["remuxJobs"][0]
-                self.assertIn(str(self.work / source), job["arguments"])
+                argument_paths = {str(Path(value).resolve()) for value in job["arguments"] if Path(value).suffix}
+                self.assertIn(str((self.work / source).resolve()), argument_paths)
                 self.assertIn("--audio-tracks", job["arguments"])
                 self.assertNotIn("--sync", job["arguments"])
                 self.assertEqual(job["expectedTracks"][1]["codecId"], "A_FLAC")

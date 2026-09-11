@@ -162,7 +162,7 @@ class DeliveryModeTests(unittest.TestCase):
                     result = media_plan.build_plan(work, manifest, state)
                     self.assertEqual([], result['issues'])
                     self.assertEqual('create', result['plan']['final']['deliveryMode'])
-                    self.assertEqual(str(target/suffix), result['plan']['final']['video'][0]['destination'])
+                    self.assertEqual(str((target/suffix).resolve()), result['plan']['final']['video'][0]['destination'])
                     (target/suffix).parent.mkdir(parents=True, exist_ok=True)
                     (target/suffix).write_bytes(b'keep')
                     result = media_plan.build_plan(work, manifest, state)
@@ -240,7 +240,7 @@ class DeliveryModeTests(unittest.TestCase):
                 with mock.patch.object(archive_backend, 'load_manifest', return_value=manifest), mock.patch.object(archive_backend, 'require_backend_config', return_value=config), mock.patch.object(archive_backend, 'save_manifest'), mock.patch.object(archive_backend, 'load_task_state', return_value={'final_target_actions':{'S01E01':'replace-choice'}}), mock.patch.object(archive_backend, '_tv_replacement_target_plan', side_effect=AssertionError('must not replace')):
                     result = archive_backend.command_prepare_final(argparse.Namespace(manifest=str(root/'manifest.json')))
                     self.assertEqual('create', result['final']['video'][0]['operation'])
-                    self.assertEqual(str(target / suffix), result['final']['video'][0]['destination'])
+                    self.assertEqual(str((target / suffix).resolve()), result['final']['video'][0]['destination'])
                     self.assertFalse(target.exists() and (target / suffix).exists())
                     (target / suffix).parent.mkdir(parents=True, exist_ok=True)
                     (target / suffix).write_bytes(b'old')

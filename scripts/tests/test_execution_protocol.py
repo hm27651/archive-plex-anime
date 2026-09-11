@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 import os
 import subprocess
 import sys
@@ -20,10 +21,231 @@ from archive_rules import RULES_VERSION, backend_cache_path, state_path  # noqa:
 from common import WorkflowIssue, load_state, save_state, write_json_atomic  # noqa: E402
 from execution_protocol import PROTOCOL_VERSION, ProtocolError, protocol_descriptor, validate_request  # noqa: E402
 from internal import library_target  # noqa: E402
+from internal.source_grouping import group_source_scope, season_name  # noqa: E402
 from internal.archive_backend import _tv_replacement_target_plan  # noqa: E402
 from internal.media_inspection import normalize_mediainfo  # noqa: E402
 from internal.metadata_client import MetadataHttpError  # noqa: E402
 from internal.remux_pipeline import execute_remux, validate_mkv_output  # noqa: E402
+from internal import archive_backend  # noqa: E402
+from internal.delivery_targets import bind_video_targets  # noqa: E402
+from internal.errors import WorkflowError  # noqa: E402
+
+
+class RemainingCleanupAndTransferTests(unittest.TestCase):
+    def test_removed_and_changed_files_are_not_implicitly_deleted(self):
+        from internal.hub_task_contract import cleanup_preview, execute_cleanup
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, library = root/'source', root/'library'
+            source.mkdir(); library.mkdir()
+            for name in ['video.mkv', 'subtitle.ass', 'font.ttf']:
+                (source/name).write_bytes(b'original')
+            baseline = {'source_directory':[{'path':p.name,'size':p.stat().st_size,'mtime_ns':p.stat().st_mtime_ns} for p in source.iterdir()]}
+            (source/'subtitle.ass').rename(root/'subtitle.ass')
+            (source/'font.ttf').write_bytes(b'modified-font')
+            (source/'unrelated.txt').write_text('keep')
+            preview = cleanup_preview(staging_directory=None,source_directory=source,formal_directories=[library],exclusive_source_directory=True,shared_parent_directory=False,delivery_confirmed=True,baseline=baseline)
+            rows = {r['path']:r for r in preview['actions'][0]['files']}
+            self.assertNotIn('subtitle.ass', rows)
+            self.assertTrue(rows['video.mkv']['recommended'])
+            self.assertFalse(rows['font.ttf']['recommended'])
+            self.assertFalse(rows['unrelated.txt']['recommended'])
+            # Even a new file appearing after preview cannot be swept into deletion.
+            (source/'added-after.txt').write_text('keep')
+            execute_cleanup(preview,['source_directory'],{'source_directory':['video.mkv']})
+            self.assertFalse((source/'video.mkv').exists())
+            self.assertTrue((source/'unrelated.txt').exists())
+            self.assertTrue((source/'added-after.txt').exists())
+            self.assertEqual(b'original',(root/'subtitle.ass').read_bytes())
+            self.assertEqual(b'modified-font',(source/'font.ttf').read_bytes())
+
+    def test_changed_selected_file_and_shared_source_block_cleanup(self):
+        from internal.hub_task_contract import cleanup_preview, execute_cleanup
+        with tempfile.TemporaryDirectory() as directory:
+            source=Path(directory)/'source';source.mkdir();video=source/'video.mkv';video.write_bytes(b'old')
+            baseline={'source_directory':[{'path':video.name,'size':3,'mtime_ns':video.stat().st_mtime_ns}]}
+            args=dict(staging_directory=None,source_directory=source,formal_directories=[Path(directory)/'library'],exclusive_source_directory=True,shared_parent_directory=False,delivery_confirmed=True,baseline=baseline)
+            preview=cleanup_preview(**args);video.write_bytes(b'changed')
+            with self.assertRaises(WorkflowError):execute_cleanup(preview,['source_directory'],{'source_directory':['video.mkv']})
+            self.assertEqual(b'changed',video.read_bytes())
+            args['shared_parent_directory']=True
+            with self.assertRaises(WorkflowError):execute_cleanup(cleanup_preview(**args),['source_directory'],{'source_directory':['video.mkv']})
+
+    def test_transfer_emits_bytes_then_checkpoint_completion_and_reuse(self):
+        from internal import final_delivery as delivery
+        from internal.signatures import file_signature
+        from contextlib import redirect_stderr
+        import io
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'source.mkv';source.write_bytes(b'x'*1024)
+            target=root/'library'/'target.mkv'
+            final={'video':[{'source':str(source),'destination':str(target),'operation':'create','sourceSignature':file_signature(source)}],'zip':[]}
+            stream=io.StringIO()
+            with redirect_stderr(stream), mock.patch.object(delivery,'_final_checkpoint_matches',return_value=False), mock.patch.object(delivery,'_save_final_checkpoint') as checkpoint, mock.patch.object(delivery,'_final_attempt_matches',return_value=False):
+                result=delivery.execute_final_delivery(root,final,'batch')
+                self.assertEqual('COMPLETE',result['status']);checkpoint.assert_called_once()
+            events=[json.loads(line.split(' ',1)[1]) for line in stream.getvalue().splitlines() if line.startswith('ARCHIVE_TRANSFER ')]
+            self.assertEqual('copying',events[0]['action'])
+            self.assertIn('verifying',[event['action'] for event in events])
+            self.assertEqual('completed',events[-1]['action']);self.assertEqual(1024,events[-1]['copied_bytes'])
+            self.assertEqual(source.read_bytes(),target.read_bytes())
+            stream=io.StringIO()
+            with redirect_stderr(stream),mock.patch.object(delivery,'_final_checkpoint_matches',return_value=True),mock.patch.object(delivery,'copy_and_verify',side_effect=AssertionError('must skip')):
+                self.assertEqual('COMPLETE',delivery.execute_final_delivery(root,final,'batch')['status'])
+            self.assertIn('reused',stream.getvalue())
+
+    def test_transfer_stderr_is_forwarded_without_corrupting_result_json(self):
+        from common import run_process
+        events=[]
+        class Progress:
+            def __call__(self):pass
+            def transfer(self,value):events.append(value)
+        result=run_process([sys.executable,'-B','-c',"import sys;print('ARCHIVE_TRANSFER {\"copied_bytes\": 123}',file=sys.stderr);print('{\"status\":\"COMPLETE\"}')"],progress=Progress())
+        self.assertEqual([{'copied_bytes':123}],events)
+        self.assertEqual('COMPLETE',json.loads(result['stdout'])['status'])
+        self.assertEqual('',result['stderr'])
+
+
+class FinalizeOptionalZipTests(unittest.TestCase):
+    def test_finalize_optional_zip_keeps_signatures_and_confirmation_checks(self):
+        from copy import deepcopy
+        from internal.signatures import seal_final_batch
+
+        for branch in ('anime', 'movie'):
+            for zip_case in ('missing', 'null', 'present'):
+                with self.subTest(branch=branch, zip=zip_case), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    video_signature = {'path': str(root / 'video.mkv'), 'size': 3, 'mtimeUtcNs': 1}
+                    zip_signature = {'path': str(root / 'subtitles.zip'), 'size': 2, 'mtimeUtcNs': 1}
+                    review = {'videos': [{'file': video_signature}]}
+                    if zip_case != 'missing':
+                        review['zip'] = {'file': zip_signature} if zip_case == 'present' else None
+                    final = seal_final_batch({'mode': 'create', 'video': [{'source': video_signature['path']}], 'zip': []})
+                    manifest = {'workPath': str(root), 'route': {'branch': branch}, 'localVerification': review,
+                                'stages': {'verify-local': {'status': 'COMPLETE'}}, 'finalPreparation': {'final': final}}
+                    args = argparse.Namespace(manifest=str(root / 'manifest.json'), approved_batch=final['batchId'], approved_digest=final['batchDigest'])
+                    with mock.patch.object(archive_backend, 'load_manifest', side_effect=lambda _: deepcopy(manifest)), mock.patch.object(archive_backend, 'require_execution') as approval, mock.patch.object(archive_backend, 'require_result_signatures') as signatures, mock.patch.object(archive_backend, 'execute_final_delivery', return_value={'status': 'COMPLETE', 'completed': [], 'warnings': []}) as delivery, mock.patch.object(archive_backend, 'save_manifest'):
+                        self.assertEqual('COMPLETE', archive_backend.command_finalize(args)['status'])
+                        approval.assert_called_once()
+                        self.assertEqual([video_signature] + ([zip_signature] if zip_case == 'present' else []), signatures.call_args.args[3])
+                        delivery.assert_called_once()
+                        delivery.reset_mock()
+                        args.approved_digest = 'incorrect'
+                        with self.assertRaises(WorkflowError) as error:
+                            archive_backend.command_finalize(args)
+                        self.assertEqual('FINAL_BATCH_MISMATCH', error.exception.code)
+                        delivery.assert_not_called()
+                        args.approved_digest = final['batchDigest']
+                        signatures.side_effect = WorkflowError('FINAL_SOURCE_CHANGED', 'source changed')
+                        with self.assertRaises(WorkflowError):
+                            archive_backend.command_finalize(args)
+                        delivery.assert_not_called()
+
+
+class DeliveryModeTests(unittest.TestCase):
+    def test_unified_preflight_binds_create_and_reports_collisions_for_both_branches(self):
+        import media_plan
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for branch, suffix in [('tv', 'S1/Komi.S01E01.mkv'), ('movie', 'Komi.mkv')]:
+                work = root / branch
+                target = root / 'library' / branch / '自选文件夹'
+                manifest = {'route':{'status':'OK','branch':'anime' if branch=='tv' else 'movie'},
+                            'discovery':{'libraryTarget':{'resolution':{'status':'OK','mode':'create','library':'Anime3' if branch=='tv' else 'Movie3','nas':{'path':str(target)}}}}}
+                tracks = [{'type':'video','name':'vcb-studio','language':'jpn','default':True,'forced':False}]
+                def generated(*_args, **_kwargs):
+                    return {'issues':[], 'plan':{'title':'Komi','remuxJobs':[{'output':str(work/suffix),'arguments':['input.mkv'],'expectedTracks':tracks}],
+                                                'final':{'video':[{'source':str(work/suffix),'relativePath':f'Komi/{suffix}','expectedTracks':tracks}]}}}
+                state = {'branch':branch,'task':'complete-archive','entrypoint':'hub','selection_mode':'custom','requested_capabilities':['inspect','remux','video-delivery'],
+                         'decisions':{'delivery_mode':'create','batch_workbench':True,'movie_plan':{'schema_version':2},'staging':{'relative_path':'Komi'}}}
+                with mock.patch('internal.movie_workbench.build_movie_plan', side_effect=generated):
+                    result = media_plan.build_plan(work, manifest, state)
+                    self.assertEqual([], result['issues'])
+                    self.assertEqual('create', result['plan']['final']['deliveryMode'])
+                    self.assertEqual(str(target/suffix), result['plan']['final']['video'][0]['destination'])
+                    (target/suffix).parent.mkdir(parents=True, exist_ok=True)
+                    (target/suffix).write_bytes(b'keep')
+                    result = media_plan.build_plan(work, manifest, state)
+                    self.assertIn('LIBRARY_CREATE_TARGET_EXISTS', [issue['code'] for issue in result['issues']])
+                    self.assertEqual(b'keep', (target/suffix).read_bytes())
+
+    def config(self, root, branch, mode):
+        library = 'Anime3' if branch == 'tv' else 'Movie3'
+        return {'tracker':{'enabled':False}, 'storageTargets':{'disk':{'localPath':str(root)}},
+                'plexLibraries':{library:{'storageTarget':'disk', 'relativePath':''}},
+                'hubTask':{'deliveryMode':mode, 'moviePlan':{'schema_version':2},
+                           'libraryTarget':{'library':library,'relative_path':'自选作品文件夹'}}}
+
+    def test_tv_and_movie_missing_directory_is_only_valid_for_create(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for branch in ['tv', 'movie']:
+                config = self.config(root, branch, 'create')
+                library = config['hubTask']['libraryTarget']['library']
+                result = archive_backend.inspect_library_existing(config, 'Komi', branch, library)
+                self.assertEqual('create', result['resolution']['mode'])
+                self.assertFalse((root / '自选作品文件夹').exists())
+                config['hubTask']['deliveryMode'] = 'replace'
+                result = archive_backend.inspect_library_existing(config, 'Komi', branch, library)
+                self.assertEqual('MANUAL_REPLACEMENT_TARGET_MISSING', result['resolution']['code'])
+                config['hubTask']['libraryTarget']['relative_path'] = '../outside'
+                self.assertEqual('MANUAL_REPLACEMENT_TARGET_INVALID', archive_backend.inspect_library_existing(config, 'Komi', branch, library)['resolution']['code'])
+
+    def test_new_entry_honors_custom_folder_and_never_replaces(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / '自选作品文件夹'
+            for suffix in ['S1/Komi.S01E01.mkv', 'Komi.cd1.mkv']:
+                job = {'source':'stage.mkv','relativePath':f'Komi/{suffix}', 'operation':'replace','destination':'untrusted'}
+                planned = bind_video_targets([job], target, 'create')
+                self.assertEqual('create', planned[0]['operation'])
+                destination = target / suffix
+                self.assertEqual(str(destination.resolve()), planned[0]['destination'])
+                self.assertFalse(target.exists() and destination.exists())
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b'original')
+                with self.assertRaisesRegex(WorkflowError, '新入库文件已存在'):
+                    bind_video_targets([job], target, 'create')
+                self.assertEqual(b'original', destination.read_bytes())
+            with self.assertRaisesRegex(WorkflowError, '无效'):
+                bind_video_targets([{'relativePath':'Komi/../escape.mkv'}], target, 'create')
+
+    def test_movie_replacement_keeps_confirmed_operation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            old = target / 'Komi.cd1.mkv'
+            old.write_bytes(b'old')
+            jobs = [{'relativePath':f'Komi/Komi.cd{n}.mkv'} for n in [1,2]]
+            planned = bind_video_targets(jobs, target, 'replace')
+            self.assertEqual(['replace','create'], [job['operation'] for job in planned])
+            old.unlink()
+            with self.assertRaisesRegex(WorkflowError, '待替换视频不存在'):
+                bind_video_targets(planned, target, 'replace', frozen=True)
+
+    def test_prepare_final_create_does_not_use_tv_replacement_or_target_actions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = root / 'source'
+            work.mkdir()
+            library_root = root / 'library'
+            library_root.mkdir()
+            for branch, suffix in [('tv','S1/Komi.S01E01.mkv'), ('movie','Komi.mkv')]:
+                config = self.config(library_root, branch, 'create')
+                library = config['hubTask']['libraryTarget']['library']
+                source = work / 'new.mkv'
+                target = library_root / '自选作品文件夹'
+                manifest = {'workPath':str(work), 'configPath':'unused', 'route':{'branch':'anime' if branch=='tv' else 'movie'},
+                            'stages':{'verify-local':{'status':'COMPLETE'}}, 'localVerification':{'videos':[{'file':{'path':str(source), 'size':3,'mtimeUtcNs':1}}]},
+                            'plan':{'title':'Komi', 'libraryTarget':{'status':'OK','mode':'create','library':library,'nas':{'path':str(target)}},
+                                    'final':{'mode':'create','deliveryMode':'create','video':[{'source':str(source), 'relativePath':f'Komi/{suffix}', 'operation':'replace'}]}}}
+                with mock.patch.object(archive_backend, 'load_manifest', return_value=manifest), mock.patch.object(archive_backend, 'require_backend_config', return_value=config), mock.patch.object(archive_backend, 'save_manifest'), mock.patch.object(archive_backend, 'load_task_state', return_value={'final_target_actions':{'S01E01':'replace-choice'}}), mock.patch.object(archive_backend, '_tv_replacement_target_plan', side_effect=AssertionError('must not replace')):
+                    result = archive_backend.command_prepare_final(argparse.Namespace(manifest=str(root/'manifest.json')))
+                    self.assertEqual('create', result['final']['video'][0]['operation'])
+                    self.assertEqual(str(target / suffix), result['final']['video'][0]['destination'])
+                    self.assertFalse(target.exists() and (target / suffix).exists())
+                    (target / suffix).parent.mkdir(parents=True, exist_ok=True)
+                    (target / suffix).write_bytes(b'old')
+                    with self.assertRaisesRegex(WorkflowError, '新入库文件已存在'):
+                        archive_backend.command_prepare_final(argparse.Namespace(manifest=str(root/'manifest.json')))
 
 
 def snapshot(root: Path, relative: str = "测试作品") -> dict:
@@ -54,6 +276,29 @@ def request(root: Path, command: str, payload: dict | None = None, *, command_id
 
 
 class ExecutionProtocolTests(unittest.TestCase):
+    def test_recommend_accepts_local_facts_and_groups_without_metadata_lookup(self):
+        value = request(Path("."), "recommend", {"branch": "tv", "source_scope": {
+            "source_relative_path": "Komi-san", "files": [{"path": "S1/01.mkv"}, {"path": "S2/13.mkv"}],
+        }})
+        value.pop("path_snapshot")
+        with mock.patch("hub_executor.inspect_metadata", side_effect=AssertionError("no remote lookup")):
+            result = hub_executor._dispatch(validate_request(value))
+        self.assertEqual("single", result["source_grouping"]["mode"])
+        self.assertEqual([1, 2], result["source_grouping"]["seasons"])
+
+    def test_inspect_sources_finishes_with_succeeded_protocol_event(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ,
+            {"ARCHIVE_PROTOCOL_CACHE_DIR": directory},
+        ), mock.patch.object(hub_executor, "load_config", return_value={"paths": {}, "tools": {}}):
+            root = Path(directory)
+            (root / "测试作品").mkdir()
+            events = hub_executor.execute(request(root, "inspect_sources", command_id="inspect-sources"))
+
+        self.assertEqual(["accepted", "running", "succeeded"], [item["status"] for item in events])
+        self.assertEqual("OK", events[-1]["result"]["status"])
+        self.assertEqual([], events[-1]["result"]["files"])
+
     def test_metadata_preview_is_path_bound_and_does_not_scan_or_change_task_state(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1121,6 +1366,133 @@ class ExecutionProtocolTests(unittest.TestCase):
         self.assertEqual([1, 2, 3], [item["sequence"] for item in events])
         self.assertEqual("succeeded", events[-1]["status"])
         self.assertEqual(b"", completed.stderr)
+
+
+def grouping(*paths, branch="tv", parent="[VCB-Studio] Komi-san"):
+    return group_source_scope({"source_relative_path": parent, "files": [{"path": path} for path in paths]}, branch)
+
+
+class SourceGroupingTests(unittest.TestCase):
+    def test_komi_seasons_are_one_work_without_episode_renumbering(self):
+        result = grouping("S1/Komi [01].mkv", "S2/Komi [13].mkv", "S1/SPs/NCOP.mkv")
+        self.assertEqual("single", result["source_grouping"]["mode"])
+        self.assertEqual([], result["split_suggestions"])
+        self.assertEqual([1, 2, 0], [row["season"] for row in result["source_scope"]["files"]])
+        self.assertEqual("S2/Komi [13].mkv", result["source_scope"]["files"][1]["path"])
+
+    def test_supported_season_names(self):
+        for name, number in [("S01", 1), ("Season01", 1), ("Season 2", 2), ("第1季", 1), ("第一季", 1), ("第十二季", 12)]:
+            with self.subTest(name=name):
+                self.assertEqual(("", number), season_name(name))
+        self.assertEqual(("作品 2", None), season_name("作品 2"))
+        self.assertEqual(("S123", None), season_name("S123"))
+
+    def test_release_tags_do_not_split_the_same_title(self):
+        result = grouping("[Nekomoe kissaten&VCB-Studio] Komi-san S1 [1080p]/01.mkv", "[VCB-Studio] Komi-san S2 [1080p]/13.mkv")
+        self.assertEqual("single", result["source_grouping"]["mode"])
+        self.assertEqual("Komi-san", result["source_grouping"]["groups"][0]["title"])
+
+    def test_different_titles_are_suggestions_not_identity_claims(self):
+        result = grouping("作品甲/01.mkv", "作品乙/01.mkv", parent="合集")
+        self.assertEqual("split", result["source_grouping"]["mode"])
+        self.assertEqual(["作品甲", "作品乙"], [g["title"] for g in result["split_suggestions"]])
+        self.assertEqual(["作品甲/01.mkv", "作品乙/01.mkv"], [g["files"][0]["path"] for g in result["split_suggestions"]])
+
+    def test_extras_do_not_become_a_work(self):
+        result = grouping("S1/01.mkv", "S2/13.mkv", "SPs/SP.mkv", "Scans/bonus.mp4")
+        self.assertEqual("single", result["source_grouping"]["mode"])
+        self.assertEqual(4, len(result["source_grouping"]["groups"][0]["files"]))
+        multi = grouping("作品甲/01.mkv", "作品乙/01.mkv", "SPs/bonus.mkv")
+        self.assertEqual(2, len(multi["split_suggestions"]))
+        self.assertEqual(1, multi["source_grouping"]["unassigned_count"])
+
+    def test_different_works_with_the_same_season_are_not_duplicate_versions(self):
+        result = grouping("作品甲 S1/01.mkv", "作品乙 S1/01.mkv")
+        self.assertEqual("split", result["source_grouping"]["mode"])
+        self.assertEqual([], result["source_grouping"]["duplicate_seasons"])
+
+    def test_unbracketed_resolution_versions_require_confirmation(self):
+        result = grouping("S1 1080p/01.mkv", "S1 2160p/01.mkv")
+        self.assertEqual("confirm", result["source_grouping"]["mode"])
+        self.assertEqual([1], result["source_grouping"]["duplicate_seasons"])
+
+    def test_tv_and_movie_must_not_be_merged(self):
+        result = grouping("S1/01.mkv", "S2/13.mkv", "Movie/movie.mkv")
+        self.assertEqual("confirm", result["source_grouping"]["mode"])
+        self.assertFalse(result["source_grouping"]["merge_allowed"])
+        self.assertEqual(["tv", "movie"], [g["branch"] for g in result["source_grouping"]["groups"]])
+        self.assertEqual(2, len(result["source_grouping"]["groups"][0]["files"]))
+
+    def test_unclear_names_and_duplicate_versions_need_confirmation(self):
+        for paths in [("第一部分/01.mkv", "第二部分/02.mkv"), ("S1 [1080p]/01.mkv", "S1 [2160p]/01.mkv"), ("01.mkv", "作品乙/01.mkv")]:
+            with self.subTest(paths=paths):
+                self.assertEqual("confirm", grouping(*paths)["source_grouping"]["mode"])
+
+    def test_movie_cd_parts_stay_together(self):
+        self.assertEqual("single", grouping("cd1/movie.mkv", "cd2/movie.mkv", branch="movie")["source_grouping"]["mode"])
+
+    def test_input_is_not_mutated_and_empty_scope_is_supported(self):
+        scope = {"source_relative_path": "Komi", "files": [{"path": "S2/13.mkv"}]}
+        group_source_scope(scope, "tv")
+        self.assertNotIn("season", scope["files"][0])
+        self.assertEqual([], grouping()["source_scope"]["files"])
+
+
+class BatchWorkbenchTests(unittest.TestCase):
+    def test_explicit_tvdb_dvd_does_not_require_tmdb(self):
+        from internal import metadata_match
+        client = mock.Mock()
+        client.series.return_value = {'name':'Komi-san'}
+        client.episodes.return_value = [{'seasonNumber':1,'number':1,'name':'Episode 1'}]
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(metadata_match, 'TmdbClient', side_effect=AssertionError('TMDB must not be contacted')), mock.patch.object(metadata_match, 'TvdbClient', return_value=client):
+            result = metadata_match.inspect_metadata(Path(directory), {'metadata':{'enabled':True}}, {'branch':'anime'}, [], {'provider':'tvdb','tvdb_id':20,'mode':'required','episode_order':'dvd','query':'Komi-san'})
+        client.episodes.assert_called_once_with(20, 'dvd')
+        self.assertEqual('MATCHED', result['status'])
+        self.assertEqual('tvdb-dvd', result['episodeOrder'])
+        self.assertEqual('tvdb', result['selected']['provider'])
+
+    def test_tv_explicit_stream_plan_uses_overrides_and_tv_output_contract(self):
+        from internal.movie_workbench import build_movie_plan
+        from internal.batch_workbench import describe_batch
+        from archive_rules import validate_plan
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            source = work / 'Komi [01].mkv'
+            source.write_bytes(b'source')
+            config = work / 'config.json'
+            config.write_text('{"paths":{},"tools":{}}', encoding='utf-8')
+            inventory = {'files':[{'id':source.name,'path':source.name,'kind':'video','signature':{'size':6,'mtime_ns':source.stat().st_mtime_ns},'tracks':[
+                {'id':'v','mux_id':0,'type':'video','codec':'V_MPEG4/ISO/AVC','title':'original','language':'jpn'},
+                {'id':'a','mux_id':7,'type':'audio','codec':'A_FLAC','title':'Main','language':'jpn','channels':2},
+                {'id':'c','mux_id':8,'type':'audio','codec':'A_AAC','title':'Commentary','language':'jpn','channels':2},
+            ]}], 'issues':[]}
+            description = describe_batch(inventory, work, 'tv', {})
+            target = description['suggested_targets'][0]
+            target.update(episode='S01E01', video_properties={'language':'und','title':'VCB'})
+            target['audio'] = [{'source':source.name,'track':'a','language':'eng','title':'2.0ch','forced':True}]
+            target['default_audio'] = {'source':source.name,'track':'a'}
+            with mock.patch('internal.movie_workbench.inspect_sources', return_value=inventory):
+                result = build_movie_plan(work, {'configPath':str(config),'discovery':{},'route':{'branch':'anime'}}, {'title':'Komi','library_target':None,'batch_workbench':True,'movie_plan':{'schema_version':2,'targets':[target]}})
+                for branch in ['anime', 'movie']:
+                    candidate = json.loads(json.dumps(target))
+                    if branch == 'movie': candidate['part'] = ''
+                    decisions = {'title':'Komi','batch_workbench':True,'batch_features':{'subtitles':True},'batch_subtitle_groups':[{'id':'g','files':[{'id':'01.ass'}]}],'movie_plan':{'schema_version':2,'targets':[candidate]}}
+                    failed = build_movie_plan(work, {'configPath':str(config),'discovery':{},'route':{'branch':branch}}, decisions)
+                    self.assertIn('BATCH_SUBTITLE_MAPPING_REQUIRED', [i['code'] for i in failed['issues']])
+                    candidate['subtitle_skips'] = ['g']
+                    skipped = build_movie_plan(work, {'configPath':str(config),'discovery':{},'route':{'branch':branch}}, decisions)
+                    self.assertNotIn('BATCH_SUBTITLE_MAPPING_REQUIRED', [i['code'] for i in skipped['issues']])
+            self.assertEqual([], result['issues'])
+            plan = result['plan']
+            self.assertEqual([], validate_plan(work, 'tv', 'local-only', plan))
+            job = plan['remuxJobs'][0]
+            self.assertTrue(job['output'].endswith('Komi.S01E01.mkv'))
+            self.assertEqual(['VCB','2.0ch'], [t['name'] for t in job['expectedTracks']])
+            self.assertEqual('eng', job['expectedTracks'][1]['language'])
+            self.assertEqual('A_FLAC', job['expectedTracks'][1]['codecId'])
+            self.assertIn('1:7', job['arguments'][-1])
+            self.assertNotIn('--sync', job['arguments'])
+            self.assertEqual(b'source', source.read_bytes())
 
 
 if __name__ == "__main__":

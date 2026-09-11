@@ -59,7 +59,7 @@ def build_plan(work: Path, manifest: dict[str, Any], state: dict[str, Any]) -> d
     task = str(state.get("task") or "complete-archive")
     decisions = state.get("decisions", {})
     issues: list[dict[str, Any]] = []
-    movie_v2 = branch == "movie" and decisions.get("movie_plan", {}).get("schema_version") == 2
+    movie_v2 = (branch == "movie" or decisions.get("batch_workbench")) and decisions.get("movie_plan", {}).get("schema_version") == 2
     if not movie_v2:
         import json
         from internal.preflight import selected_font_inventory
@@ -90,6 +90,9 @@ def build_plan(work: Path, manifest: dict[str, Any], state: dict[str, Any]) -> d
             generated = build_movie_archive_only_plan(work, manifest, decisions)
         else:
             generated = {"plan": {}, "issues": [{"code": "BRANCH_REQUIRED"}], "summary": {}}
+    elif movie_v2:
+        from internal.movie_workbench import build_movie_plan as batch_builder
+        generated = batch_builder(work, manifest, decisions, completed_steps=set(state.get("completed_steps", [])))
     elif branch == "tv":
         generated = build_tv_plan(
             work,
@@ -159,6 +162,32 @@ def build_plan(work: Path, manifest: dict[str, Any], state: dict[str, Any]) -> d
     )
     issues.extend(resolution["issues"])
     apply_final_sinks(plan, resolution["final_sinks"])
+    delivery_mode = decisions.get("delivery_mode")
+    expected_task = {"local": "local-only", "create": "complete-archive", "replace": "replacement"}.get(delivery_mode)
+    if expected_task and task != expected_task:
+        issues.append({"code": "ARCHIVE_DELIVERY_MODE_CONFLICT", "detail": "入库方式与任务模式不一致，请保存配置并重新检查。"})
+    if movie_v2 and entrypoint == "hub" and task != "local-only" and delivery_mode not in {"create", "replace"}:
+        issues.append({"code": "ARCHIVE_DELIVERY_MODE_REQUIRED", "detail": "请在输出方式中选择新入库或洗版入库。"})
+    if delivery_mode in {"create", "replace"} and plan.get("final", {}).get("video"):
+        from internal.delivery_targets import bind_video_targets
+        from internal.errors import WorkflowError
+
+        target = plan.get("libraryTarget", {})
+        directory = (target.get("nas") or {}).get("path")
+        final = plan["final"]
+        final["deliveryMode"] = delivery_mode
+        if target.get("status") == "OK" and directory:
+            if delivery_mode == "replace" and target.get("mode") == "create":
+                issues.append({"code": "MANUAL_REPLACEMENT_TARGET_MISSING", "detail": "洗版入库必须指定已有作品文件夹。"})
+            if delivery_mode == "create" or branch == "movie":
+                try:
+                    final["video"] = bind_video_targets(final["video"], Path(directory), delivery_mode)
+                    final["mode"] = delivery_mode
+                    final["targetRoot"] = directory
+                except WorkflowError as exc:
+                    issues.append({"code": exc.code, "detail": str(exc)})
+        elif target.get("status") == "OK" or not target:
+            issues.append({"code": "LIBRARY_TARGET_REQUIRED", "detail": "请选择库目录中的作品文件夹。"})
     if movie_v2 and "package" not in resolution["selected_steps"]:
         plan["package"] = None
     if plan:

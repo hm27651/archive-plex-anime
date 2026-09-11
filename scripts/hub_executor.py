@@ -41,6 +41,7 @@ from internal.metadata_client import (
 )
 from internal.metadata_match import inspect_metadata
 from internal.hub_task_contract import cleanup_preview, execute_cleanup
+from internal.source_grouping import group_source_scope
 from toolchain import ToolchainError
 from tv_plan import season_number, source_episode
 
@@ -134,6 +135,7 @@ def _recommend(payload: dict[str, Any]) -> dict[str, Any]:
     recommended = "replacement" if has_storage else "local-only"
     options = _workflow_options(payload.get("branch"), recommended=recommended)
     return {
+        **(group_source_scope(payload["source_scope"], payload.get("branch", "tv")) if "source_scope" in payload else {}),
         "status": "OK",
         "workflow_options": options,
         "metadata": {
@@ -400,6 +402,7 @@ def _inspect_analysis(work: Path, output: dict[str, Any]) -> dict[str, Any]:
         "embedded_subtitles": discovery.get("embeddedSubtitles", {}),
         "movie_audio": discovery.get("movieAudioPreflights", []),
         "movie_targets": discovery.get("movie_targets", []),
+        'batch_jobs': [{key: job.get(key) for key in ('targetId', 'source', 'output', 'expectedTracks', 'expectedChapters', 'expectedAttachments')} for job in (manifest.get('plan') or {}).get('remuxJobs', [])],
         "library_target": discovery.get("libraryTarget"),
         "metadata": discovery.get("metadata", {}),
     }
@@ -462,7 +465,9 @@ def _dispatch(request: dict[str, Any]) -> dict[str, Any]:
     work = resolve_work_dir(request["path_snapshot"])
     if command == "inspect_sources":
         from internal.movie_workbench import inspect_sources
-        return inspect_sources(work, load_config())
+        from internal.batch_workbench import describe_batch
+        config = load_config()
+        return describe_batch(inspect_sources(work, config), work, request['path_snapshot']['branch'], config.get('hubTask', {}).get('taskScope', {}))
     if command == "metadata_preview":
         decisions = payload.get("decisions") if isinstance(payload.get("decisions"), dict) else {}
         metadata = decisions.get("metadata") if isinstance(decisions.get("metadata"), dict) else {}
@@ -508,16 +513,45 @@ def _dispatch(request: dict[str, Any]) -> dict[str, Any]:
             *request["path_snapshot"]["storage_roots"].values(),
             *request["path_snapshot"]["subtitle_roots"].values(),
         ]
+        baseline = json.loads(json.dumps(payload.get('baseline') or {}))
+        if not isinstance(baseline, dict):
+            raise ProtocolError('PROTOCOL_REQUEST_INVALID', 'cleanup baseline must be an object')
+        cache_path = backend_cache_path(work)
+        cache = read_json(cache_path) if cache_path.is_file() else {}
+        if 'staging' not in baseline:
+            root = task_output_root(work)
+            baseline['staging'] = []
+            signatures = [item.get('file') for item in (cache.get('localVerification') or {}).get('videos', [])]
+            zip_record = (cache.get('localVerification') or {}).get('zip')
+            if isinstance(zip_record, dict):
+                signatures.append(zip_record.get('file'))
+            for signature in signatures:
+                if signature and Path(signature['path']).is_relative_to(root):
+                    baseline['staging'].append({'path': Path(signature['path']).relative_to(root).as_posix(), 'size': signature['size'], 'mtime_ns': signature.get('mtimeUtcNs', signature.get('mtimeNs'))})
+        checkpoints = (state.get('final_results') or {}).get('video') or {}
+        final_plan = (cache.get('finalPreparation') or {}).get('final') or {}
+        expected_destinations = {item['destination'] for item in final_plan.get('video', [])}
+        delivered = 'finalize' in set(state.get('completed_steps') or []) and bool(expected_destinations) and expected_destinations.issubset(checkpoints)
+        for destination, checkpoint in checkpoints.items():
+            path = Path(destination)
+            if checkpoint.get('status') != 'COMPLETE' or not path.is_file() or path.stat().st_size != checkpoint.get('size'):
+                delivered = False
+        for item in final_plan.get('zip', []):
+            path = Path(item['destination'])
+            checkpoint = ((state.get('final_results') or {}).get('zip') or {}).get(str(path), {})
+            if checkpoint.get('status') != 'COMPLETE' or not path.is_file() or path.stat().st_size != checkpoint.get('size'):
+                delivered = False
         preview = cleanup_preview(
             staging_directory=task_output_root(work),
             source_directory=source,
             formal_directories=formal,
             exclusive_source_directory=bool(scope.get("exclusive_source_directory", False)),
             shared_parent_directory=bool(scope.get("shared_parent_directory", False)),
-            delivery_confirmed="finalize" in set(state.get("completed_steps") or []),
+            delivery_confirmed=delivered,
+            baseline=baseline,
         )
         if command == "cleanup_preview":
-            return preview
+            return {**preview, 'baseline': baseline}
         if payload["preview_version"] != preview["preview_version"]:
             raise ProtocolError(
                 "ARCHIVE_CLEANUP_PREVIEW_STALE",
@@ -525,7 +559,9 @@ def _dispatch(request: dict[str, Any]) -> dict[str, Any]:
                 category="decision",
                 details={"current_preview_version": preview["preview_version"]},
             )
-        return execute_cleanup(preview, payload["selected_kinds"])
+        if not delivered:
+            raise ProtocolError('ARCHIVE_CLEANUP_NOT_ALLOWED', '请先确认正式文件仍完整存在。')
+        return execute_cleanup(preview, payload["selected_kinds"], payload.get('selected_files'))
     if command == "initialize":
         capabilities = payload.get("capabilities")
         preset = payload.get("preset", "complete-archive")
@@ -960,7 +996,7 @@ def execute(
                 "total_items": int(value.get("total_items") or 0),
                 "current_item": str(value.get("current_item") or ""),
             }
-            for key in ("reused_items", "remaining_items", "remaining_bytes", "available_bytes"):
+            for key in ("reused_items", "remaining_items", "remaining_bytes", "available_bytes", "copied_bytes", "total_bytes", "bytes_per_second", "overall_copied_bytes", "overall_total_bytes"):
                 if key in value:
                     progress[key] = max(int(value.get(key) or 0), 0)
             if "action" in value:
@@ -972,8 +1008,8 @@ def execute(
                 stage=stage,
                 status="running",
                 message=str(value.get("message") or "file progress updated"),
-                artifacts=_artifact_projection(work, _workflow_state(work)),
-                checkpoints=_checkpoint_projection(_workflow_state(work)),
+                artifacts=empty_artifacts() if 'copied_bytes' in progress else _artifact_projection(work, _workflow_state(work)),
+                checkpoints=[] if 'copied_bytes' in progress else _checkpoint_projection(_workflow_state(work)),
                 progress=progress,
             )
             events.append(progress_event)

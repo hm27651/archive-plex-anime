@@ -7,13 +7,14 @@ from common import backend_cache_path, backend_command, load_state, read_text, r
 
 
 class FinalizeProgress:
-    def __init__(self, work, batch: str) -> None:
+    def __init__(self, work, batch: str, callback=None) -> None:
         self.work = work
         self.batch = batch
         self.last = None
         self.video_total = 0
         self.zip_total = 0
         self.has_tracker = False
+        self.callback = callback
         try:
             manifest = json.loads(read_text(backend_cache_path(work)))
             final = manifest.get("finalPreparation", {}).get("final") or manifest.get("plan", {}).get("final", {})
@@ -22,6 +23,10 @@ class FinalizeProgress:
             self.has_tracker = bool(final.get("trackerPlan"))
         except (OSError, json.JSONDecodeError):
             pass
+
+    def transfer(self, value: dict) -> None:
+        if self.callback:
+            self.callback(value)
 
     def snapshot(self) -> dict:
         state = load_state(self.work)
@@ -58,7 +63,7 @@ def run(context):
     digest = context["state"].get("approved_final_digest")
     if not batch or not digest:
         return result("NEEDS_USER", "final batch approval, batch id, and digest are required")
-    progress = FinalizeProgress(context["work_dir"], str(batch))
+    progress = FinalizeProgress(context["work_dir"], str(batch), getattr(context.get('args'), 'progress', None))
     output = backend_command(
         context["work_dir"],
         "finalize",

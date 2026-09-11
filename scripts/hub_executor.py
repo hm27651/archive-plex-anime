@@ -513,25 +513,34 @@ def _dispatch(request: dict[str, Any]) -> dict[str, Any]:
             *request["path_snapshot"]["storage_roots"].values(),
             *request["path_snapshot"]["subtitle_roots"].values(),
         ]
-        baseline = json.loads(json.dumps(payload.get('baseline') or {}))
-        if not isinstance(baseline, dict):
-            raise ProtocolError('PROTOCOL_REQUEST_INVALID', 'cleanup baseline must be an object')
-        cache_path = backend_cache_path(work)
-        cache = read_json(cache_path) if cache_path.is_file() else {}
-        if 'staging' not in baseline:
-            root = task_output_root(work)
-            baseline['staging'] = []
-            signatures = [item.get('file') for item in (cache.get('localVerification') or {}).get('videos', [])]
-            zip_record = (cache.get('localVerification') or {}).get('zip')
-            if isinstance(zip_record, dict):
-                signatures.append(zip_record.get('file'))
-            for signature in signatures:
-                if signature and Path(signature['path']).is_relative_to(root):
-                    baseline['staging'].append({'path': Path(signature['path']).relative_to(root).as_posix(), 'size': signature['size'], 'mtime_ns': signature.get('mtimeUtcNs', signature.get('mtimeNs'))})
+        legacy_cleanup = 'baseline' not in payload
+        baseline = None if legacy_cleanup else json.loads(json.dumps(payload.get('baseline') or {}))
+        cache = {}
+        if baseline is not None:
+            if not isinstance(baseline, dict):
+                raise ProtocolError('PROTOCOL_REQUEST_INVALID', 'cleanup baseline must be an object')
+            cache_path = backend_cache_path(work)
+            cache = read_json(cache_path) if cache_path.is_file() else {}
+            if 'staging' not in baseline:
+                root = task_output_root(work)
+                baseline['staging'] = []
+                signatures = [item.get('file') for item in (cache.get('localVerification') or {}).get('videos', [])]
+                zip_record = (cache.get('localVerification') or {}).get('zip')
+                if isinstance(zip_record, dict):
+                    signatures.append(zip_record.get('file'))
+                for signature in signatures:
+                    if signature and Path(signature['path']).is_relative_to(root):
+                        baseline['staging'].append({'path': Path(signature['path']).relative_to(root).as_posix(), 'size': signature['size'], 'mtime_ns': signature.get('mtimeUtcNs', signature.get('mtimeNs'))})
         checkpoints = (state.get('final_results') or {}).get('video') or {}
         final_plan = (cache.get('finalPreparation') or {}).get('final') or {}
         expected_destinations = {item['destination'] for item in final_plan.get('video', [])}
-        delivered = 'finalize' in set(state.get('completed_steps') or []) and bool(expected_destinations) and expected_destinations.issubset(checkpoints)
+        completed_steps = set(state.get('completed_steps') or [])
+        # Legacy tasks have no persisted final plan/checkpoints. Keep their
+        # existing cleanup behavior; new plans must prove every destination.
+        has_delivery_plan = bool(expected_destinations or final_plan.get('zip'))
+        delivered = ('finalize' in completed_steps) if not has_delivery_plan else (
+            'finalize' in completed_steps and expected_destinations.issubset(checkpoints)
+        )
         for destination, checkpoint in checkpoints.items():
             path = Path(destination)
             if checkpoint.get('status') != 'COMPLETE' or not path.is_file() or path.stat().st_size != checkpoint.get('size'):

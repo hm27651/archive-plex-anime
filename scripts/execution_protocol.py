@@ -17,16 +17,17 @@ from internal.hub_task_contract import (
 )
 
 
-PROTOCOL_VERSION = "1.4"
-COMPATIBLE_PROTOCOL_VERSIONS = ("1.3", PROTOCOL_VERSION)
+PROTOCOL_VERSION = "1.5"
+COMPATIBLE_PROTOCOL_VERSIONS = ("1.3", "1.4", PROTOCOL_VERSION)
 PROTOCOL_SCHEMA_VERSION = 1
 ENGINE_NAME = "archive-plex-anime"
-ENGINE_VERSION = "2026-09-01-single-work-task-v1"
+ENGINE_VERSION = "2026-09-06-batch-workbench-v1"
 COMMANDS = (
     "capabilities",
     "recommend",
     "metadata_check",
     "metadata_preview",
+    "inspect_sources",
     "initialize",
     "status",
     "approve_preflight",
@@ -51,9 +52,10 @@ HUB_STEPS = ("inspect", "movie-audio", "subtitle", "remux", "package", "review",
 HUB_PRESETS = ("complete-archive", "replacement", "archive-only", "local-only")
 COMMAND_PAYLOAD_FIELDS = {
     "capabilities": ("branch",),
-    "recommend": ("branch", "has_storage", "has_subtitle_archive", "metadata_enabled"),
+    "recommend": ("branch", "has_storage", "has_subtitle_archive", "metadata_enabled", "source_scope"),
     "metadata_check": ("providers", "proxy", "language"),
     "metadata_preview": ("decisions", "local_seasons"),
+    "inspect_sources": (),
     "initialize": (
         "preset",
         "capabilities",
@@ -68,8 +70,8 @@ COMMAND_PAYLOAD_FIELDS = {
     "approve_preflight": ("decisions",),
     "approve_final": ("final_target",),
     "mapping_preview": ("strategy", "scope", "parameters", "decisions"),
-    "cleanup_preview": (),
-    "cleanup_execute": ("preview_version", "selected_kinds"),
+    "cleanup_preview": ("baseline",),
+    "cleanup_execute": ("preview_version", "selected_kinds", "baseline", "selected_files"),
     "run_step": ("step", "rerun"),
 }
 APPROVE_FINAL_TARGET_FIELDS = ("storage_id", "target_actions")
@@ -214,6 +216,7 @@ def _contract() -> dict[str, Any]:
             "remaining_bytes",
             "available_bytes",
             "action",
+            "copied_bytes", "total_bytes", "bytes_per_second", "overall_copied_bytes", "overall_total_bytes",
         ],
         "next_action_required": ["id", "label", "enabled", "reason"],
         "idempotency": "same command_id and request replays the original event sequence; changed request is rejected",
@@ -441,6 +444,13 @@ def validate_request(value: Any) -> dict[str, Any]:
             raise ProtocolError("PROTOCOL_REQUEST_INVALID", "payload.branch is invalid")
     else:
         validate_path_snapshot(snapshot)
+    if command == "recommend" and "source_scope" in payload:
+        scope = _object(payload["source_scope"], "payload.source_scope")
+        files = scope.get("files")
+        if not isinstance(scope.get("source_relative_path"), str) or not isinstance(files, list):
+            raise ProtocolError("PROTOCOL_REQUEST_INVALID", "source_scope requires a relative directory and files")
+        if any(not isinstance(row, dict) or not isinstance(row.get("path"), str) or not row["path"] for row in files):
+            raise ProtocolError("PROTOCOL_REQUEST_INVALID", "source_scope files require paths")
     sinks = payload.get("final_sinks")
     if sinks is not None:
         if not isinstance(sinks, list) or any(item not in HUB_FINAL_SINKS for item in sinks) or len(sinks) != len(set(sinks)):
@@ -475,7 +485,17 @@ def validate_request(value: Any) -> dict[str, Any]:
             raise ProtocolError("PROTOCOL_REQUEST_INVALID", "payload.scope is invalid")
         _object(payload.get("parameters", {}), "payload.parameters")
         _object(payload.get("decisions", {}), "payload.decisions")
+    if command in {'cleanup_preview', 'cleanup_execute'} and 'baseline' in payload:
+        baseline = _object(payload['baseline'], 'payload.baseline')
+        if set(baseline) - {'source_directory', 'staging'}:
+            raise ProtocolError('PROTOCOL_REQUEST_INVALID', 'invalid cleanup baseline kind')
+        for rows in baseline.values():
+            if not isinstance(rows, list) or any(not isinstance(row, dict) or not isinstance(row.get('path'), str) or type(row.get('size')) is not int or type(row.get('mtime_ns')) is not int for row in rows):
+                raise ProtocolError('PROTOCOL_REQUEST_INVALID', 'invalid cleanup baseline files')
     if command == "cleanup_execute":
+        selected_files = _object(payload.get('selected_files', {}), 'payload.selected_files')
+        if set(selected_files) - {'source_directory', 'staging'} or any(not isinstance(rows, list) or any(not isinstance(name, str) for name in rows) for rows in selected_files.values()):
+            raise ProtocolError('PROTOCOL_REQUEST_INVALID', 'invalid cleanup file selection')
         preview_version = str(payload.get("preview_version") or "")
         if not re.fullmatch(r"[0-9a-f]{64}", preview_version):
             raise ProtocolError("PROTOCOL_CLEANUP_PREVIEW_INVALID", "preview_version must be a SHA-256 digest")
@@ -588,6 +608,7 @@ def event(
         "remaining_bytes",
         "available_bytes",
         "action",
+        "copied_bytes", "total_bytes", "bytes_per_second", "overall_copied_bytes", "overall_total_bytes",
     }
     if not progress_required.issubset(checked_progress) or set(checked_progress) - progress_required - progress_optional:
         raise ProtocolError("PROTOCOL_EVENT_INVALID", "progress fields do not match the contract")

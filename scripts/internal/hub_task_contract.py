@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
+import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -69,6 +69,27 @@ def _directory_snapshot(path: Path) -> dict[str, Any]:
         "total_bytes": total_bytes,
         "exists": path.is_dir(),
     }
+
+
+def remaining_files(path: Path, baseline: list[dict]) -> list[dict]:
+    known = {item['path']: item for item in baseline}
+    rows = []
+    if not path.is_dir() or path.is_symlink():
+        return rows
+    for parent, directories, files in os.walk(path, followlinks=False):
+        links = [name for name in directories if (Path(parent) / name).is_symlink()]
+        directories[:] = [name for name in directories if name not in links]
+        for name in sorted([*files, *links]):
+            item = Path(parent) / name
+            stat = item.lstat()
+            relative = item.relative_to(path).as_posix()
+            old = known.get(relative)
+            protected = relative in {'.archive-state.json', 'execution-cache.json'}
+            eligible = not item.is_symlink() and item.is_file() and not protected
+            recommended = eligible and old is not None and old.get('size') == stat.st_size and old.get('mtime_ns') == stat.st_mtime_ns
+            rows.append({'path': relative, 'size': stat.st_size, 'mtime_ns': stat.st_mtime_ns, 'eligible': eligible, 'recommended': recommended,
+                         'reason': '' if recommended else '恢复记录，暂时保留' if protected else '新增、已修改或归属不明，默认保留；删除需明确勾选'})
+    return sorted(rows, key=lambda row: row['path'])
 
 
 def validate_remote_identity(value: Any, *, branch: str) -> dict[str, Any]:
@@ -225,6 +246,7 @@ def cleanup_preview(
     exclusive_source_directory: bool,
     shared_parent_directory: bool,
     delivery_confirmed: bool,
+    baseline: dict[str, list[dict]] | None = None,
 ) -> dict[str, Any]:
     """Describe deletable roots; never return a formal destination as deletable."""
 
@@ -257,12 +279,20 @@ def cleanup_preview(
             **_directory_snapshot(source),
         }
     )
+    if baseline is not None:
+        for action in actions:
+            rows = remaining_files(Path(action['path']), baseline.get(action['kind'], []))
+            action['files'] = rows
+            action['file_count'] = sum(row['eligible'] for row in rows)
+            action['total_bytes'] = sum(row['size'] for row in rows if row['eligible'])
+            action['preserved_count'] = sum(not row['recommended'] for row in rows)
+            action['snapshot_id'] = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
     result = {"status": "OK", "actions": actions, "formal_directories": [str(item) for item in formal]}
     canonical = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return {**result, "preview_version": hashlib.sha256(canonical).hexdigest()}
 
 
-def execute_cleanup(preview: dict[str, Any], selected_kinds: list[str]) -> dict[str, Any]:
+def execute_cleanup(preview: dict[str, Any], selected_kinds: list[str], selected_files: dict[str, list[str]] | None = None) -> dict[str, Any]:
     """Delete only explicitly selected, pre-authorized roots from a fresh preview."""
 
     selected = set(selected_kinds)
@@ -274,7 +304,10 @@ def execute_cleanup(preview: dict[str, Any], selected_kinds: list[str]) -> dict[
     for action in preview.get("actions", []):
         if not isinstance(action, dict) or action.get("kind") not in selected:
             continue
-        path = Path(str(action.get("path") or "")).resolve(strict=False)
+        raw_path = Path(str(action.get("path") or ""))
+        if raw_path.is_symlink():
+            raise WorkflowError('ARCHIVE_CLEANUP_TARGET_INVALID', '清理目录不能是符号链接。')
+        path = raw_path.resolve(strict=False)
         if not action.get("allowed"):
             raise WorkflowError("ARCHIVE_CLEANUP_NOT_ALLOWED", "Selected cleanup action is not authorized")
         if str(path).casefold() in formal:
@@ -282,6 +315,37 @@ def execute_cleanup(preview: dict[str, Any], selected_kinds: list[str]) -> dict[
         if path.exists():
             if not path.is_dir():
                 raise WorkflowError("ARCHIVE_CLEANUP_TARGET_INVALID", "Cleanup targets must be whole directories")
-            shutil.rmtree(path)
-        completed.append({"kind": action["kind"], "path": str(path), "status": "deleted"})
+            if 'files' not in action:
+                raise WorkflowError('ARCHIVE_CLEANUP_PREVIEW_STALE', '请重新读取剩余文件并确认清单。')
+            chosen = set((selected_files or {}).get(action['kind'], []))
+            records = {item['path']: item for item in action['files']}
+            if not chosen or not chosen.issubset(records) or any(not records[name]['eligible'] for name in chosen):
+                raise WorkflowError('ARCHIVE_CLEANUP_SELECTION_INVALID', '只允许删除清单中可清理的文件。')
+            paths = []
+            for name in sorted(chosen):
+                target = path / name
+                if PurePosixPath(name).is_absolute() or any(p in {'', '.', '..'} or ':' in p for p in name.replace('\\', '/').split('/')):
+                    raise WorkflowError('ARCHIVE_CLEANUP_TARGET_INVALID', '清理文件必须位于任务目录内。')
+                if target.is_symlink() or not target.resolve().is_relative_to(path) or any(_overlaps(target.resolve(), Path(root)) for root in preview.get('formal_directories', [])):
+                    raise WorkflowError('ARCHIVE_CLEANUP_TARGET_INVALID', '清理路径已改变。')
+                if not target.exists():
+                    continue
+                stat = target.stat()
+                if not target.is_file() or stat.st_size != records[name]['size'] or stat.st_mtime_ns != records[name]['mtime_ns']:
+                    raise WorkflowError('ARCHIVE_CLEANUP_PREVIEW_STALE', '文件已变化，请重新读取清单。')
+                paths.append((target, records[name]))
+            for target, record in paths:
+                if not target.exists():
+                    continue
+                stat = target.lstat()
+                if target.is_symlink() or not target.resolve().is_relative_to(path) or stat.st_size != record['size'] or stat.st_mtime_ns != record['mtime_ns']:
+                    raise WorkflowError('ARCHIVE_CLEANUP_PREVIEW_STALE', '文件已变化，已停止清理。')
+                target.unlink()
+            # Remove only empty directories; unrelated additions always survive.
+            for parent, _, _ in os.walk(path, topdown=False, followlinks=False):
+                try:
+                    Path(parent).rmdir()
+                except OSError:
+                    pass
+        completed.append({"kind": action["kind"], "path": str(path), "status": "remaining" if path.exists() else "deleted"})
     return {"status": "COMPLETE", "completed": completed}

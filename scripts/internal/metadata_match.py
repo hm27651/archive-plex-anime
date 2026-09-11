@@ -307,6 +307,9 @@ def local_seasons(work: Path, files: list[Path]) -> list[int]:
 def _metadata_options(config: dict[str, Any], supplied: Any) -> dict[str, Any]:
     base = config.get("metadata", {}) if isinstance(config.get("metadata"), dict) else {}
     requested = supplied if isinstance(supplied, dict) else {}
+    episode_order = str(requested.get('episode_order', base.get('episodeOrder', 'tmdb'))).casefold()
+    if episode_order in {'aired', 'dvd', 'absolute', 'alternate', 'regional', 'official'}:
+        episode_order = 'tvdb-' + episode_order
     try:
         timeout = max(1.0, min(float(base.get("timeoutSeconds", 10)), 60.0))
     except (TypeError, ValueError):
@@ -319,7 +322,7 @@ def _metadata_options(config: dict[str, Any], supplied: Any) -> dict[str, Any]:
         "tvdbId": requested.get("tvdb_id"),
         "mediaType": str(requested.get("tmdb_type") or "").casefold(),
         "language": str(requested.get("language", base.get("language", "zh-CN"))),
-        "episodeOrder": str(requested.get("episode_order", base.get("episodeOrder", "tmdb"))).casefold(),
+        "episodeOrder": episode_order,
         "year": requested.get("year"),
         "seasonBindings": requested.get("season_bindings") if isinstance(requested.get("season_bindings"), dict) else {},
         "proxy": base.get("proxy", ""),
@@ -448,6 +451,11 @@ def inspect_metadata(
     options = _metadata_options(config, supplied)
     branch = "tv" if route.get("branch") == "anime" else "movie" if route.get("branch") == "movie" else ""
     media_type = options["mediaType"] or branch
+    targets = config.get('hubTask', {}).get('moviePlan', {}).get('targets', [])
+    if media_type == 'tv' and targets:
+        planned = [re.fullmatch(r'S(\d{2})E\d{2,3}', str(t.get('episode') or '')) for t in targets]
+        if all(planned):
+            local_season_numbers = sorted({int(match[1]) for match in planned})
     query_selection = derive_metadata_query(work, files, explicit_query=options["query"])
     query = str(query_selection["query"])
     base = {
@@ -486,6 +494,51 @@ def inspect_metadata(
         base["issues"].append({"code": "METADATA_CONFIG_INVALID"})
         return base
 
+    if supplied.get("provider") == "tvdb":
+        http = http_factory(proxy=proxy or None, timeout=options["timeout"], retries=2)
+        try:
+            client = TvdbClient(http)
+            selected_id = _safe_int(options["tvdbId"])
+            searched = [] if selected_id else client.search(query, media_type, year=_safe_int(options["year"]))
+            base["candidates"] = [
+                {"provider": "tvdb", "mediaType": media_type, "id": int(item["tvdb_id"]),
+                 "title": (item.get("translations") or {}).get("zho") or item.get("name") or "",
+                 "originalTitle": item.get("name") or "", "year": item.get("year")}
+                for item in searched if str(item.get("tvdb_id") or "").isdigit()
+            ]
+            if not selected_id:
+                base["status"] = "NEEDS_USER"
+                base["issues"].append({"code": "METADATA_CANDIDATE_REQUIRED", "provider": "tvdb", "candidates": base["candidates"]})
+                return base
+            details = client.series(selected_id) if media_type == 'tv' else client.movie(selected_id)
+            name = str(details.get("name") or "")
+            translated = details.get("translations", {})
+            names = translated.get("nameTranslations", []) if isinstance(translated, dict) else []
+            preferred = next((t.get("name") for t in names if t.get("language") == "zho"), None)
+            selected = {"provider": "tvdb", "mediaType": media_type, "id": selected_id, "title": preferred or name,
+                        "originalTitle": name, "originalLanguage": details.get("originalLanguage") or "", "aliases": [], "seasons": []}
+            base.update(status="MATCHED", selected=selected, tvdb={"status": "MATCHED", "id": selected_id, "name": name})
+            if not base["candidates"]:
+                base["candidates"] = [selected]
+            if media_type == 'tv':
+                order = options['episodeOrder'].removeprefix('tvdb-')
+                order = 'aired' if order in {'tmdb', 'official'} else order
+                if order not in {'aired','dvd','absolute','alternate','regional'}:
+                    base['status'] = 'NEEDS_USER'
+                    base['issues'].append({'code':'TVDB_EPISODE_ORDER_INVALID','provider':'tvdb'})
+                    return base
+                base['episodeOrder'] = 'tvdb-' + order
+                base['episodes'] = _tvdb_episode_summary(client.episodes(selected_id, order))
+                if not base['episodes']:
+                    base['status'] = 'NEEDS_USER'
+                    base['issues'].append({'code':'TVDB_EPISODE_ORDER_UNAVAILABLE','provider':'tvdb','order':order})
+            base["suggestedDecisions"] = {"title": selected["title"], "metadata": {**supplied, "provider": "tvdb", "tvdb_id": selected_id, "tmdb_type": media_type, 'episode_order':base['episodeOrder']}}
+            return base
+        except MetadataHttpError as exc:
+            base["status"] = "NEEDS_USER"
+            base["issues"].append({"code": exc.code, "provider": "tvdb", "detail": str(exc)})
+            return base
+
     explicit_tmdb = _safe_int(options["tmdbId"])
     if explicit_tmdb is None and query_selection["issues"]:
         base["status"] = "NEEDS_USER"
@@ -517,6 +570,7 @@ def inspect_metadata(
         return base
 
     selected = normalize_tmdb_details(details, media_type)
+    selected["originalLanguage"] = str(details.get("original_language") or "")
     base["selected"] = selected
     base["suggestedDecisions"] = {
         "title": selected["title"] or selected["originalTitle"],
@@ -559,6 +613,29 @@ def inspect_metadata(
                 if int(item.get("episodeCount") or 0) > 0
             }
             missing_tmdb = sorted(set(requested_seasons) - available_seasons)
+            # An explicit provider choice is not permission to switch providers.
+            # Offer a file-number-based mapping only when the remote episodes
+            # actually exist; the user must adopt it before the plan can run.
+            if missing_tmdb and supplied.get('provider') == 'tmdb' and targets:
+                base['status'] = 'NEEDS_USER'
+                if len(available_seasons) == 1:
+                    from tv_plan import source_episode
+                    remote_season = next(iter(available_seasons))
+                    try:
+                        base['episodes'] = tmdb_episode_summary(tmdb.season(selected['id'], remote_season, language=options['language']))
+                        valid = {item['episode'] for item in base['episodes']}
+                        proposal = {}
+                        for target in targets:
+                            number = source_episode(Path(str(target.get('video') or '')))
+                            if number is not None and number in valid:
+                                proposal[target['video']] = f'S{remote_season:02d}E{number:02d}'
+                        if len(proposal) == len(targets) and len(set(proposal.values())) == len(targets):
+                            base['episode_map_proposal'] = proposal
+                    except MetadataHttpError as exc:
+                        base['issues'].append({'code':exc.code,'provider':'tmdb','detail':str(exc)})
+                        return base
+                base['issues'].append({'code':'SEASON_MAPPING_REQUIRED','provider':'tmdb','detail':'本地目录季度与所选来源不同，请核对并采用编号对应。'})
+                return base
             tvdb_fallback_id = _safe_int(options["tvdbId"]) or selected.get("tvdbId")
             if missing_tmdb and tvdb_fallback_id:
                 options["episodeOrder"] = "tvdb-aired"

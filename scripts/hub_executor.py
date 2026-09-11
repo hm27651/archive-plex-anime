@@ -41,6 +41,7 @@ from internal.metadata_client import (
 )
 from internal.metadata_match import inspect_metadata
 from internal.hub_task_contract import cleanup_preview, execute_cleanup
+from internal.source_grouping import group_source_scope
 from toolchain import ToolchainError
 from tv_plan import season_number, source_episode
 
@@ -134,6 +135,7 @@ def _recommend(payload: dict[str, Any]) -> dict[str, Any]:
     recommended = "replacement" if has_storage else "local-only"
     options = _workflow_options(payload.get("branch"), recommended=recommended)
     return {
+        **(group_source_scope(payload["source_scope"], payload.get("branch", "tv")) if "source_scope" in payload else {}),
         "status": "OK",
         "workflow_options": options,
         "metadata": {
@@ -282,6 +284,14 @@ def _decision_requests(analysis: dict[str, Any], output: dict[str, Any]) -> list
         "MANUAL_REPLACEMENT_TARGET_MISSING": ("重新选择现有作品位置", "directory", "library_target"),
         "STAGING_OUTPUT_REQUIRED": ("选择任务输出位置", "directory", "staging"),
         "CAPABILITY_UNAVAILABLE": ("恢复所需功能", "notice", ""),
+        "FONT_NOT_FOUND": ("补齐字体或取消对应字幕", "choice", "subtitles"),
+        "MOVIE_SUBTITLE_INFO_REQUIRED": ("补充字幕组和类型", "choice", "subtitles"),
+        "MOVIE_SUBTITLE_VERSION_REQUIRED": ("区分重复字幕版本", "choice", "subtitles"),
+        "MOVIE_EXTERNAL_AUDIO_CONFIRMATION_REQUIRED": ("确认外部音轨适用性", "choice", "audio"),
+        "MOVIE_DEFAULT_AUDIO_REQUIRED": ("选择默认音轨", "choice", "audio"),
+        "MAIN_AUDIO_REQUIRED": ("选择正片音轨", "choice", "audio"),
+        "MOVIE_TARGET_CONFLICT": ("确认视频版本和分段", "choice", "video"),
+        "MOVIE_VIDEO_REQUIRED": ("选择本次处理的视频", "choice", "video"),
     }
     result = []
     seen: set[str] = set()
@@ -299,9 +309,10 @@ def _decision_requests(analysis: dict[str, Any], output: dict[str, Any]) -> list
                 **issue,
                 "message": "已选择必须获取在线剧集信息；请检查元数据连接，或改用自动/离线模式。",
             }
-        if code in seen and code != "SUBTITLE_EPISODE_UNMATCHED":
+        identity = json.dumps([code, issue.get("target_id"), issue.get("source"), issue.get("font")], ensure_ascii=False)
+        if identity in seen and code != "SUBTITLE_EPISODE_UNMATCHED":
             continue
-        seen.add(code)
+        seen.add(identity)
         label, kind, field = labels.get(code, ("还有一项信息需要确认", "notice", ""))
         if code == "CAPABILITY_UNAVAILABLE" and capability == "metadata":
             label, kind, field = "恢复在线剧集信息", "notice", "metadata.mode"
@@ -390,6 +401,8 @@ def _inspect_analysis(work: Path, output: dict[str, Any]) -> dict[str, Any]:
         "missing_fonts": discovery.get("missingFonts", []),
         "embedded_subtitles": discovery.get("embeddedSubtitles", {}),
         "movie_audio": discovery.get("movieAudioPreflights", []),
+        "movie_targets": discovery.get("movie_targets", []),
+        'batch_jobs': [{key: job.get(key) for key in ('targetId', 'source', 'output', 'expectedTracks', 'expectedChapters', 'expectedAttachments')} for job in (manifest.get('plan') or {}).get('remuxJobs', [])],
         "library_target": discovery.get("libraryTarget"),
         "metadata": discovery.get("metadata", {}),
     }
@@ -450,6 +463,11 @@ def _dispatch(request: dict[str, Any]) -> dict[str, Any]:
     if command == "metadata_check":
         return _metadata_check(payload)
     work = resolve_work_dir(request["path_snapshot"])
+    if command == "inspect_sources":
+        from internal.movie_workbench import inspect_sources
+        from internal.batch_workbench import describe_batch
+        config = load_config()
+        return describe_batch(inspect_sources(work, config), work, request['path_snapshot']['branch'], config.get('hubTask', {}).get('taskScope', {}))
     if command == "metadata_preview":
         decisions = payload.get("decisions") if isinstance(payload.get("decisions"), dict) else {}
         metadata = decisions.get("metadata") if isinstance(decisions.get("metadata"), dict) else {}
@@ -495,16 +513,45 @@ def _dispatch(request: dict[str, Any]) -> dict[str, Any]:
             *request["path_snapshot"]["storage_roots"].values(),
             *request["path_snapshot"]["subtitle_roots"].values(),
         ]
+        baseline = json.loads(json.dumps(payload.get('baseline') or {}))
+        if not isinstance(baseline, dict):
+            raise ProtocolError('PROTOCOL_REQUEST_INVALID', 'cleanup baseline must be an object')
+        cache_path = backend_cache_path(work)
+        cache = read_json(cache_path) if cache_path.is_file() else {}
+        if 'staging' not in baseline:
+            root = task_output_root(work)
+            baseline['staging'] = []
+            signatures = [item.get('file') for item in (cache.get('localVerification') or {}).get('videos', [])]
+            zip_record = (cache.get('localVerification') or {}).get('zip')
+            if isinstance(zip_record, dict):
+                signatures.append(zip_record.get('file'))
+            for signature in signatures:
+                if signature and Path(signature['path']).is_relative_to(root):
+                    baseline['staging'].append({'path': Path(signature['path']).relative_to(root).as_posix(), 'size': signature['size'], 'mtime_ns': signature.get('mtimeUtcNs', signature.get('mtimeNs'))})
+        checkpoints = (state.get('final_results') or {}).get('video') or {}
+        final_plan = (cache.get('finalPreparation') or {}).get('final') or {}
+        expected_destinations = {item['destination'] for item in final_plan.get('video', [])}
+        delivered = 'finalize' in set(state.get('completed_steps') or []) and bool(expected_destinations) and expected_destinations.issubset(checkpoints)
+        for destination, checkpoint in checkpoints.items():
+            path = Path(destination)
+            if checkpoint.get('status') != 'COMPLETE' or not path.is_file() or path.stat().st_size != checkpoint.get('size'):
+                delivered = False
+        for item in final_plan.get('zip', []):
+            path = Path(item['destination'])
+            checkpoint = ((state.get('final_results') or {}).get('zip') or {}).get(str(path), {})
+            if checkpoint.get('status') != 'COMPLETE' or not path.is_file() or path.stat().st_size != checkpoint.get('size'):
+                delivered = False
         preview = cleanup_preview(
             staging_directory=task_output_root(work),
             source_directory=source,
             formal_directories=formal,
             exclusive_source_directory=bool(scope.get("exclusive_source_directory", False)),
             shared_parent_directory=bool(scope.get("shared_parent_directory", False)),
-            delivery_confirmed="finalize" in set(state.get("completed_steps") or []),
+            delivery_confirmed=delivered,
+            baseline=baseline,
         )
         if command == "cleanup_preview":
-            return preview
+            return {**preview, 'baseline': baseline}
         if payload["preview_version"] != preview["preview_version"]:
             raise ProtocolError(
                 "ARCHIVE_CLEANUP_PREVIEW_STALE",
@@ -512,7 +559,9 @@ def _dispatch(request: dict[str, Any]) -> dict[str, Any]:
                 category="decision",
                 details={"current_preview_version": preview["preview_version"]},
             )
-        return execute_cleanup(preview, payload["selected_kinds"])
+        if not delivered:
+            raise ProtocolError('ARCHIVE_CLEANUP_NOT_ALLOWED', '请先确认正式文件仍完整存在。')
+        return execute_cleanup(preview, payload["selected_kinds"], payload.get('selected_files'))
     if command == "initialize":
         capabilities = payload.get("capabilities")
         preset = payload.get("preset", "complete-archive")
@@ -916,7 +965,7 @@ def execute(
     request = validate_request(request_value)
     work = None if request["command"] in {"capabilities", "recommend", "metadata_check"} else resolve_work_dir(request["path_snapshot"])
     digest = request_digest(request)
-    cache_work = None if request["command"] in {"cleanup_preview", "cleanup_execute"} else work
+    cache_work = None if request["command"] in {"cleanup_preview", "cleanup_execute", "inspect_sources"} else work
     cache = _command_cache(cache_work, request["command_id"])
     with _exclusive_command_lock(cache):
         cached = _replay_cached_events(cache, request, digest)
@@ -947,7 +996,7 @@ def execute(
                 "total_items": int(value.get("total_items") or 0),
                 "current_item": str(value.get("current_item") or ""),
             }
-            for key in ("reused_items", "remaining_items", "remaining_bytes", "available_bytes"):
+            for key in ("reused_items", "remaining_items", "remaining_bytes", "available_bytes", "copied_bytes", "total_bytes", "bytes_per_second", "overall_copied_bytes", "overall_total_bytes"):
                 if key in value:
                     progress[key] = max(int(value.get(key) or 0), 0)
             if "action" in value:
@@ -959,8 +1008,8 @@ def execute(
                 stage=stage,
                 status="running",
                 message=str(value.get("message") or "file progress updated"),
-                artifacts=_artifact_projection(work, _workflow_state(work)),
-                checkpoints=_checkpoint_projection(_workflow_state(work)),
+                artifacts=empty_artifacts() if 'copied_bytes' in progress else _artifact_projection(work, _workflow_state(work)),
+                checkpoints=[] if 'copied_bytes' in progress else _checkpoint_projection(_workflow_state(work)),
                 progress=progress,
             )
             events.append(progress_event)
@@ -977,7 +1026,7 @@ def execute(
                 _ACTIVE_PROGRESS.reset(progress_token)
             status = normalized_status(output.get("status"))
             summary = str(output.get("summary") or output.get("error") or status)
-            state = _workflow_state(work, output)
+            state = {} if request["command"] == "inspect_sources" else _workflow_state(work, output)
             final_event = event(
                 request,
                 sequence=len(events) + 1,

@@ -293,7 +293,7 @@ def inspect_library_existing(config: dict[str, Any], title: str, branch: str, pr
             or root is None
             or not relative_text
             or relative.is_absolute()
-            or any(part in {"", ".", ".."} for part in relative.parts)
+            or any(part in {"", ".", ".."} or ":" in part for part in relative_text.split("/"))
         ):
             resolution = {
                 "status": "NEEDS_USER",
@@ -303,6 +303,15 @@ def inspect_library_existing(config: dict[str, Any], title: str, branch: str, pr
             }
             return {"trackerState": tracker_state, "trackerMatches": [], "nasMatches": [], "resolution": resolution}
         selected = (root / Path(*relative.parts)).resolve(strict=False)
+        delivery_mode = config.get("hubTask", {}).get("deliveryMode", "")
+        if not is_under(selected, root) or selected == root.resolve(strict=False):
+            return {"trackerState": tracker_state, "trackerMatches": [], "nasMatches": [], "resolution": {"status": "NEEDS_USER", "code": "MANUAL_REPLACEMENT_TARGET_INVALID", "target": {"path": str(selected)}}}
+        if delivery_mode == "create" and is_under(selected, root) and selected.exists() and not selected.is_dir():
+            return {"trackerState": tracker_state, "trackerMatches": [], "nasMatches": [], "resolution": {"status": "NEEDS_USER", "code": "LIBRARY_CREATE_TARGET_EXISTS", "target": {"path": str(selected)}}}
+        if delivery_mode == "create" and is_under(selected, root) and selected != root.resolve(strict=False) and (not selected.exists() or selected.is_dir()):
+            return {"trackerState": tracker_state, "trackerMatches": [], "nasMatches": [], "resolution": {"status": "OK", "mode": "create", "deliveryMode": "create", "library": library, "manual": True, "nas": {"path": str(selected), "library": library}}}
+        if not delivery_mode and branch == "movie" and config.get("hubTask", {}).get("moviePlan", {}).get("schema_version") == 2 and is_under(selected, root) and not selected.exists():
+            return {"trackerState": tracker_state, "trackerMatches": [], "nasMatches": [], "resolution": {"status": "OK", "mode": "create", "library": library, "manual": True, "nas": {"path": str(selected), "library": library}}}
         if not is_under(selected, root) or not selected.is_dir():
             resolution = {
                 "status": "NEEDS_USER",
@@ -980,11 +989,23 @@ def command_prepare_final(args: argparse.Namespace) -> dict[str, Any]:
         if isinstance(target_nas, dict) and target_nas.get("path")
         else None
     )
+    delivery_mode = final.get("deliveryMode")
+    if delivery_mode in {"create", "replace"}:
+        if target_directory is None or root is None or not is_under(target_directory, root) or target_directory == root.resolve(strict=False):
+            raise WorkflowError("LIBRARY_TARGET_PATH_INVALID", "已确认的作品文件夹不在所选库目录内。")
+        if delivery_mode == "replace" and not target_directory.is_dir():
+            raise WorkflowError("MANUAL_REPLACEMENT_TARGET_MISSING", f"洗版作品文件夹不存在：{target_directory}")
+    if delivery_mode == "create" or (delivery_mode == "replace" and manifest.get("route", {}).get("branch") == "movie"):
+        from internal.delivery_targets import bind_video_targets
+        final["video"] = bind_video_targets(list(final.get("video", [])), target_directory, delivery_mode, frozen=True)
+        final["mode"] = delivery_mode
+        final["targetRoot"] = str(target_directory)
     if (
         manifest.get("route", {}).get("branch") == "anime"
         and target_directory is not None
         and final.get("video")
         and final.get("mode") != "tv-webrip-to-bdrip"
+        and delivery_mode != "create"
     ):
         planned_video, target_conflicts, target_summary = _tv_replacement_target_plan(
             list(final.get("video", [])), target_directory, target_actions
@@ -1093,7 +1114,8 @@ def command_finalize(args: argparse.Namespace) -> dict[str, Any]:
     manifest = load_manifest(path)
     require_execution(args, manifest, "final")
     local_signatures = [item.get("file") for item in manifest.get("localVerification", {}).get("videos", []) if item.get("file")]
-    local_zip_signature = manifest.get("localVerification", {}).get("zip", {}).get("file")
+    # Video-only reviews explicitly store zip=None; it is not a missing review.
+    local_zip_signature = (manifest.get("localVerification", {}).get("zip") or {}).get("file")
     if local_zip_signature:
         local_signatures.append(local_zip_signature)
     if local_signatures:

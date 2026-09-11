@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import queue
 from pathlib import Path
 from typing import Any, Callable
 
@@ -130,16 +132,39 @@ def run_process(
             "stderr": decode_output(completed.stderr),
         }
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        transfer_events = queue.Queue()
+        def read_errors(pipe):
+            for line in iter(pipe.readline, b''):
+                if line.startswith(b'ARCHIVE_TRANSFER '):
+                    try:
+                        transfer_events.put(json.loads(line[len(b'ARCHIVE_TRANSFER '):]))
+                    except (ValueError, UnicodeError):
+                        stderr.write(line)
+                else:
+                    stderr.write(line)
+            pipe.close()
+        def drain_transfer_events():
+            while not transfer_events.empty():
+                value = transfer_events.get_nowait()
+                if hasattr(progress, 'transfer'):
+                    try:
+                        progress.transfer(value)
+                    except Exception:
+                        # Progress is observational; never interrupt an in-flight copy.
+                        pass
         process = subprocess.Popen(
             arguments,
             stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
             stdout=stdout,
-            stderr=stderr,
+            stderr=subprocess.PIPE,
         )
+        reader = threading.Thread(target=read_errors, args=(process.stderr,), daemon=True)
+        reader.start()
         if stdin is not None and process.stdin is not None:
             process.stdin.write(stdin)
             process.stdin.close()
         while True:
+            drain_transfer_events()
             if progress is not None:
                 try:
                     progress()
@@ -150,6 +175,8 @@ def run_process(
                 break
             except subprocess.TimeoutExpired:
                 continue
+        reader.join()
+        drain_transfer_events()
         if progress is not None:
             try:
                 progress()

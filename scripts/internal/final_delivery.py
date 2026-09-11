@@ -8,6 +8,9 @@ import os
 import re
 import shutil
 import threading
+import json
+import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -93,13 +96,29 @@ def _source_snapshot_matches(source: Path, expected: dict[str, Any]) -> bool:
     return current["size"] == expected.get("size") and current["mtimeUtcNs"] == expected.get("mtimeUtcNs")
 
 
-def _direct_final_copy(source: Path, destination: Path, operation: str, owned_partial: bool) -> None:
-    if operation != "create" or owned_partial:
+def _copy_with_progress(source: Path, destination: Path, report, *, exclusive: bool = False) -> None:
+    if report is None:
         shutil.copy2(source, destination)
         return
+    copied = 0
+    with source.open('rb') as src, destination.open('xb' if exclusive else 'wb') as dst:
+        while chunk := src.read(8 * 1024 * 1024):
+            dst.write(chunk)
+            copied += len(chunk)
+            report(copied, 'copying')
+    shutil.copystat(source, destination)
+
+
+def _direct_final_copy(source: Path, destination: Path, operation: str, owned_partial: bool, report=None) -> None:
+    if operation != "create" or owned_partial:
+        _copy_with_progress(source, destination, report)
+        return
     try:
-        with source.open("rb") as source_stream, destination.open("xb") as destination_stream:
-            shutil.copyfileobj(source_stream, destination_stream, length=16 * 1024 * 1024)
+        if report is not None:
+            _copy_with_progress(source, destination, report, exclusive=True)
+        else:
+            with source.open("rb") as source_stream, destination.open("xb") as destination_stream:
+                shutil.copyfileobj(source_stream, destination_stream, length=16 * 1024 * 1024)
     except FileExistsError as exc:
         raise WorkflowError(
             "FINAL_CREATE_TARGET_CHANGED",
@@ -170,13 +189,15 @@ def copy_and_verify(job: dict[str, Any], _media_tool: str | None = None) -> dict
         if temporary.exists() and (not temporary.is_file() or temporary.stat().st_size != source_size):
             temporary.unlink(missing_ok=True)
         if not temporary.is_file():
-            shutil.copy2(source, temporary)
+            _copy_with_progress(source, temporary, job.get('_report'))
         if not _source_snapshot_matches(source, source_snapshot):
             temporary.unlink(missing_ok=True)
             raise WorkflowError("FINAL_SOURCE_CHANGED", f"Final source changed during copy: {source}")
         if temporary.stat().st_size != source_size:
             raise WorkflowError("FINAL_SIZE_MISMATCH", f"Temporary copy size mismatch: {temporary}")
 
+        if job.get('_report'):
+            job['_report'](source_size, 'verifying')
         try:
             require_zip_merge_base_unchanged()
             if operation == "create":
@@ -217,7 +238,7 @@ def copy_and_verify(job: dict[str, Any], _media_tool: str | None = None) -> dict
             )
         try:
             require_zip_merge_base_unchanged()
-            _direct_final_copy(source, destination, operation, owned_partial)
+            _direct_final_copy(source, destination, operation, owned_partial, job.get('_report'))
         except WorkflowError:
             raise
         except OSError as copy_error:
@@ -228,6 +249,8 @@ def copy_and_verify(job: dict[str, Any], _media_tool: str | None = None) -> dict
         method = "direct-overwrite-fallback"
         temporary.unlink(missing_ok=True)
 
+    if job.get('_report'):
+        job['_report'](source_size, 'verifying')
     if not _source_snapshot_matches(source, source_snapshot):
         raise WorkflowError("FINAL_SOURCE_CHANGED", f"Final source changed during final write: {source}")
     if not destination.is_file() or destination.stat().st_size != source_size:
@@ -415,12 +438,41 @@ def execute_final_delivery(
     checkpoint_lock = threading.Lock()
     fallback_mode_lock = threading.Lock()
     direct_fallback_roots: set[str] = set()
+    transfer_lock = threading.Lock()
+    transfer_jobs = [*(final.get('video') or []), *(final.get('zip') or [])]
+    sizes = {j['destination']: int((j.get('sourceSignature') or {}).get('size') or (resolve_path(j['source']).stat().st_size if resolve_path(j['source']).is_file() else 0)) for j in transfer_jobs}
+    transferred: dict[str, int] = {}
+    finished: set[str] = set()
 
-    def copy_with_checkpoint(job: dict[str, Any], kind: str) -> dict[str, Any]:
+    def reporter(job):
+        started = time.monotonic()
+        last = [0.0]
+        destination = job['destination']
+        def report(copied, action):
+            now = time.monotonic()
+            if action == 'copying' and now - last[0] < 0.5:
+                return
+            last[0] = now
+            with transfer_lock:
+                transferred[destination] = min(copied, sizes[destination])
+                if action in {'completed', 'reused'}:
+                    finished.add(destination)
+                value = {'stage': 'finalize', 'current_item': destination, 'action': action,
+                         'completed_items': len(finished), 'total_items': len(sizes),
+                         'copied_bytes': transferred[destination], 'total_bytes': sizes[destination],
+                         'bytes_per_second': int(copied / max(now - started, 0.001)) if action == 'copying' else 0,
+                         'overall_copied_bytes': sum(transferred.values()), 'overall_total_bytes': sum(sizes.values())}
+                print('ARCHIVE_TRANSFER ' + json.dumps(value, ensure_ascii=False), file=sys.stderr, flush=True)
+        return report
+
+    def _copy_with_checkpoint(job: dict[str, Any], kind: str) -> dict[str, Any]:
         destination = str(job["destination"])
         source = str(job["source"])
+        report = reporter(job)
         if _final_checkpoint_matches(work, batch_id, kind, destination, source):
+            report(sizes[destination], 'reused')
             return {"destination": destination, "status": "SKIPPED_VERIFIED"}
+        report(0, 'copying')
         destination_root = os.path.normcase(str(resolve_path(destination).anchor))
         with fallback_mode_lock:
             force_direct_fallback = destination_root in direct_fallback_roots
@@ -432,6 +484,7 @@ def execute_final_delivery(
                 "_work": str(work),
                 "_checkpoint_lock": checkpoint_lock,
                 "_force_direct_fallback": force_direct_fallback,
+                "_report": report,
             }
         )
         if item.get("disableAtomicReplace"):
@@ -455,7 +508,15 @@ def execute_final_delivery(
             size=checkpoint_size,
             source_size=source_path.stat().st_size if source_path.is_file() else 0,
         )
+        report(sizes[destination], 'completed')
         return item
+
+    def copy_with_checkpoint(job: dict[str, Any], kind: str) -> dict[str, Any]:
+        try:
+            return _copy_with_checkpoint(job, kind)
+        except Exception:
+            reporter(job)(transferred.get(job['destination'], 0), 'failed')
+            raise
 
     def run_video() -> dict[str, Any]:
         jobs = final.get("video", [])

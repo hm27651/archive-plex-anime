@@ -343,7 +343,7 @@ def available_capabilities(plan: dict[str, Any], manifest: dict[str, Any]) -> se
         available.add("video-delivery")
     if final.get("zip"):
         available.add("subtitle-delivery")
-    tracker_state = manifest.get("discovery", {}).get("libraryTarget", {}).get("trackerState", {})
+    tracker_state = (manifest.get("discovery", {}).get("libraryTarget") or {}).get("trackerState", {})
     if tracker_state.get("status") == "OK":
         available.add("kdocs-tracker")
     if "video-delivery" in available:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -316,7 +317,14 @@ def execute_cleanup(preview: dict[str, Any], selected_kinds: list[str], selected
             if not path.is_dir():
                 raise WorkflowError("ARCHIVE_CLEANUP_TARGET_INVALID", "Cleanup targets must be whole directories")
             if 'files' not in action:
-                raise WorkflowError('ARCHIVE_CLEANUP_PREVIEW_STALE', '请重新读取剩余文件并确认清单。')
+                # Protocol 1.4 and earlier previews did not carry a file baseline.
+                # Keep those saved cleanup requests executable; fresh previews use
+                # the explicit selected_files path below.
+                if selected_files is not None:
+                    raise WorkflowError('ARCHIVE_CLEANUP_PREVIEW_STALE', '请重新读取剩余文件并确认清单。')
+                shutil.rmtree(path)
+                completed.append({"kind": action["kind"], "path": str(path), "status": "deleted"})
+                continue
             chosen = set((selected_files or {}).get(action['kind'], []))
             records = {item['path']: item for item in action['files']}
             if not chosen or not chosen.issubset(records) or any(not records[name]['eligible'] for name in chosen):
